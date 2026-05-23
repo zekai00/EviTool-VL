@@ -1,0 +1,25 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.log
+.DS_Store
+
+# Local artifacts
+outputs/
+checkpoints/
+runs/
+wandb/
+
+# Data and model caches
+data/raw/
+data/processed/
+data/eval_mini
+data/evitool_1k/
+data/evitool_5k/
+data/evitool_30k/
+models/
+.cache/
+
+# Third-party repositories are cloned locally and should not be vendored.
+third_party/

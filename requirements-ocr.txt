@@ -1,0 +1,12 @@
+# Installed OCR backends for this project.
+# Current Python: /opt/conda/envs/agent_env/bin/python3
+
+# Default fast backend in tools/ocr.py auto mode.
+easyocr
+
+# Higher-quality but slower CPU backend. Requires paddlepaddle runtime.
+paddleocr
+paddlepaddle
+
+# Optional only if the system tesseract binary is installed.
+# pytesseract

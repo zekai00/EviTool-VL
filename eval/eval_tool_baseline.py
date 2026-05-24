@@ -66,6 +66,7 @@ TOOL_DESCRIPTIONS = """Available visual tools. Coordinates are pixel coordinates
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True, help="Local model path or HF repo id.")
+    parser.add_argument("--adapter", default=None, help="Optional PEFT/LoRA adapter path to load on top of --model.")
     parser.add_argument("--data", default="data/eval_mini/eval_mini_100.jsonl")
     parser.add_argument("--image-root", default="data/eval_mini")
     parser.add_argument("--output", required=True, help="Prediction JSONL path.")
@@ -86,8 +87,8 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_model(model_name_or_path: str):
-    return base.load_model(model_name_or_path)
+def load_model(model_name_or_path: str, adapter_name_or_path: str | None = None):
+    return base.load_model(model_name_or_path, adapter_name_or_path)
 
 
 def load_rows(path: Path) -> list[dict[str, Any]]:
@@ -564,8 +565,10 @@ def main() -> int:
     rows = select_rows(load_rows(data_path), args)
     print(f"Loaded {len(rows)} samples from {data_path}", flush=True)
     print(f"Loading model: {args.model}", flush=True)
+    if args.adapter:
+        print(f"Loading adapter: {args.adapter}", flush=True)
     processor = AutoProcessor.from_pretrained(args.model, trust_remote_code=True)
-    model = load_model(args.model)
+    model = load_model(args.model, args.adapter)
     model.eval()
 
     results = []
@@ -584,6 +587,7 @@ def main() -> int:
 
     summary = summarize_tool_results(results)
     summary["model"] = args.model
+    summary["adapter"] = args.adapter
     summary["data"] = str(data_path)
     summary["max_tool_steps"] = args.max_tool_steps
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")

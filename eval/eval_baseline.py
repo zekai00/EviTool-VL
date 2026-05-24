@@ -39,6 +39,7 @@ GROUNDING_TASKS = {"gui_grounding"}
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True, help="Local model path or HF repo id.")
+    parser.add_argument("--adapter", default=None, help="Optional PEFT/LoRA adapter path to load on top of --model.")
     parser.add_argument("--data", default="data/eval_mini/eval_mini_100.jsonl")
     parser.add_argument("--image-root", default="data/eval_mini")
     parser.add_argument("--output", required=True, help="Prediction JSONL path.")
@@ -81,7 +82,7 @@ def select_rows(rows: list[dict[str, Any]], args: argparse.Namespace) -> list[di
     return rows
 
 
-def load_model(model_name_or_path: str):
+def load_model(model_name_or_path: str, adapter_name_or_path: str | None = None):
     lower_name = model_name_or_path.lower()
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
     kwargs = {"dtype": dtype, "device_map": "auto", "trust_remote_code": True}
@@ -89,11 +90,21 @@ def load_model(model_name_or_path: str):
     if "qwen3" in lower_name:
         if Qwen3VLForConditionalGeneration is None:
             raise RuntimeError("Current transformers does not expose Qwen3VLForConditionalGeneration.")
-        return Qwen3VLForConditionalGeneration.from_pretrained(model_name_or_path, **kwargs)
+        model = Qwen3VLForConditionalGeneration.from_pretrained(model_name_or_path, **kwargs)
+        if adapter_name_or_path:
+            from peft import PeftModel
+
+            model = PeftModel.from_pretrained(model, adapter_name_or_path)
+        return model
 
     if Qwen2_5_VLForConditionalGeneration is None:
         raise RuntimeError("Current transformers does not expose Qwen2_5_VLForConditionalGeneration.")
-    return Qwen2_5_VLForConditionalGeneration.from_pretrained(model_name_or_path, **kwargs)
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_name_or_path, **kwargs)
+    if adapter_name_or_path:
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, adapter_name_or_path)
+    return model
 
 
 def direct_prompt(row: dict[str, Any]) -> str:
@@ -349,8 +360,10 @@ def main() -> int:
     rows = select_rows(load_rows(data_path), args)
     print(f"Loaded {len(rows)} samples from {data_path}", flush=True)
     print(f"Loading model: {args.model}", flush=True)
+    if args.adapter:
+        print(f"Loading adapter: {args.adapter}", flush=True)
     processor = AutoProcessor.from_pretrained(args.model, trust_remote_code=True)
-    model = load_model(args.model)
+    model = load_model(args.model, args.adapter)
     model.eval()
 
     results = []
@@ -386,6 +399,7 @@ def main() -> int:
 
     summary = summarize(results)
     summary["model"] = args.model
+    summary["adapter"] = args.adapter
     summary["data"] = str(data_path)
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2), flush=True)

@@ -27,12 +27,17 @@ DEFAULT_ENDPOINT = "https://hf-mirror.com"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--output-file", default="eval_mini_100.jsonl")
     parser.add_argument("--endpoint", default=os.environ.get("HF_ENDPOINT", DEFAULT_ENDPOINT))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--chartqa", type=int, default=30)
     parser.add_argument("--docvqa", type=int, default=25)
     parser.add_argument("--ai2d", type=int, default=20)
     parser.add_argument("--screenspot", type=int, default=25)
+    parser.add_argument("--chartqa-offset", type=int, default=0)
+    parser.add_argument("--docvqa-offset", type=int, default=0)
+    parser.add_argument("--ai2d-offset", type=int, default=0)
+    parser.add_argument("--screenspot-offset", type=int, default=0)
     parser.add_argument("--max-scan", type=int, default=500)
     return parser.parse_args()
 
@@ -50,19 +55,21 @@ def first_text(value: Any) -> str:
     return str(value)
 
 
-def take_stream(stream: Iterable[dict[str, Any]], limit: int, max_scan: int) -> list[dict[str, Any]]:
+def take_stream(stream: Iterable[dict[str, Any]], limit: int, max_scan: int, offset: int = 0) -> list[tuple[int, dict[str, Any]]]:
     samples = []
     for idx, example in enumerate(stream):
         if idx >= max_scan or len(samples) >= limit:
             break
-        samples.append(example)
+        if idx < offset:
+            continue
+        samples.append((idx, example))
     return samples
 
 
-def build_chartqa(out_dir: Path, limit: int, max_scan: int) -> list[dict[str, Any]]:
+def build_chartqa(out_dir: Path, limit: int, max_scan: int, offset: int) -> list[dict[str, Any]]:
     ds = load_dataset("HuggingFaceM4/ChartQA", split="test", streaming=True)
     records = []
-    for i, ex in enumerate(take_stream(ds, limit, max_scan)):
+    for i, (src_idx, ex) in enumerate(take_stream(ds, limit, max_scan, offset)):
         image_rel = f"images/chartqa/{i:04d}.png"
         save_image(ex["image"], out_dir / image_rel)
         answer = first_text(ex.get("label", ""))
@@ -74,15 +81,15 @@ def build_chartqa(out_dir: Path, limit: int, max_scan: int) -> list[dict[str, An
             "question": str(ex.get("query", "")),
             "answer": answer,
             "answers": ex.get("label", [answer]),
-            "meta": {"human_or_machine": ex.get("human_or_machine")},
+            "meta": {"source_index": src_idx, "human_or_machine": ex.get("human_or_machine")},
         })
     return records
 
 
-def build_docvqa(out_dir: Path, limit: int, max_scan: int) -> list[dict[str, Any]]:
+def build_docvqa(out_dir: Path, limit: int, max_scan: int, offset: int) -> list[dict[str, Any]]:
     ds = load_dataset("lmms-lab/DocVQA", "DocVQA", split="validation", streaming=True)
     records = []
-    for i, ex in enumerate(take_stream(ds, limit, max_scan)):
+    for i, (src_idx, ex) in enumerate(take_stream(ds, limit, max_scan, offset)):
         image_rel = f"images/docvqa/{i:04d}.png"
         save_image(ex["image"], out_dir / image_rel)
         answer = first_text(ex.get("answers", ""))
@@ -95,6 +102,7 @@ def build_docvqa(out_dir: Path, limit: int, max_scan: int) -> list[dict[str, Any
             "answer": answer,
             "answers": ex.get("answers", [answer]),
             "meta": {
+                "source_index": src_idx,
                 "question_id": ex.get("questionId"),
                 "question_types": ex.get("question_types"),
                 "doc_id": ex.get("docId"),
@@ -103,10 +111,10 @@ def build_docvqa(out_dir: Path, limit: int, max_scan: int) -> list[dict[str, Any
     return records
 
 
-def build_ai2d(out_dir: Path, limit: int, max_scan: int) -> list[dict[str, Any]]:
+def build_ai2d(out_dir: Path, limit: int, max_scan: int, offset: int) -> list[dict[str, Any]]:
     ds = load_dataset("lmms-lab/ai2d", split="test", streaming=True)
     records = []
-    for i, ex in enumerate(take_stream(ds, limit, max_scan)):
+    for i, (src_idx, ex) in enumerate(take_stream(ds, limit, max_scan, offset)):
         image_rel = f"images/ai2d/{i:04d}.png"
         save_image(ex["image"], out_dir / image_rel)
         options = [str(option) for option in ex.get("options", [])]
@@ -128,7 +136,7 @@ def build_ai2d(out_dir: Path, limit: int, max_scan: int) -> list[dict[str, Any]]
             "question": question,
             "answer": answer,
             "choices": options,
-            "meta": {"raw_answer": raw_answer},
+            "meta": {"source_index": src_idx, "raw_answer": raw_answer},
         })
     return records
 
@@ -138,10 +146,10 @@ def xywh_to_xyxy(bbox: list[Any]) -> list[int]:
     return [x, y, x + w, y + h]
 
 
-def build_screenspot(out_dir: Path, limit: int, max_scan: int) -> list[dict[str, Any]]:
+def build_screenspot(out_dir: Path, limit: int, max_scan: int, offset: int) -> list[dict[str, Any]]:
     ds = load_dataset("lmms-lab/ScreenSpot-v2", split="train", streaming=True)
     records = []
-    for i, ex in enumerate(take_stream(ds, limit, max_scan)):
+    for i, (src_idx, ex) in enumerate(take_stream(ds, limit, max_scan, offset)):
         image_rel = f"images/screenspot/{i:04d}.png"
         save_image(ex["image"], out_dir / image_rel)
         bbox_xyxy = xywh_to_xyxy(ex.get("bbox", [0, 0, 0, 0]))
@@ -156,6 +164,7 @@ def build_screenspot(out_dir: Path, limit: int, max_scan: int) -> list[dict[str,
             "answer_bbox": bbox_xyxy,
             "evidence_regions": [{"id": "gt_ev_1", "bbox": bbox_xyxy, "label": instruction}],
             "meta": {
+                "source_index": src_idx,
                 "img_filename": ex.get("img_filename"),
                 "data_type": ex.get("data_type"),
                 "data_source": ex.get("data_source"),
@@ -183,27 +192,41 @@ def main() -> int:
     records: list[dict[str, Any]] = []
 
     plan = [
-        ("chartqa", args.chartqa, build_chartqa),
-        ("docvqa", args.docvqa, build_docvqa),
-        ("ai2d", args.ai2d, build_ai2d),
-        ("screenspot", args.screenspot, build_screenspot),
+        ("chartqa", args.chartqa, args.chartqa_offset, build_chartqa),
+        ("docvqa", args.docvqa, args.docvqa_offset, build_docvqa),
+        ("ai2d", args.ai2d, args.ai2d_offset, build_ai2d),
+        ("screenspot", args.screenspot, args.screenspot_offset, build_screenspot),
     ]
     summary = {}
-    for name, limit, builder in plan:
+    offsets = {}
+    for name, limit, offset, builder in plan:
         if limit <= 0:
             continue
-        print(f"Building {name}: target={limit}", flush=True)
-        built = builder(out_dir, limit, args.max_scan)
+        print(f"Building {name}: target={limit} offset={offset}", flush=True)
+        built = builder(out_dir, limit, args.max_scan, offset)
         records.extend(built)
         summary[name] = len(built)
+        offsets[name] = offset
         print(f"Built {name}: {len(built)}", flush=True)
 
-    write_jsonl(out_dir / "eval_mini_100.jsonl", records)
+    output_path = out_dir / args.output_file
+    write_jsonl(output_path, records)
     (out_dir / "summary.json").write_text(
-        json.dumps({"total": len(records), "by_source": summary}, ensure_ascii=False, indent=2),
+        json.dumps(
+            {
+                "total": len(records),
+                "output_file": args.output_file,
+                "by_source": summary,
+                "offsets": offsets,
+                "max_scan": args.max_scan,
+                "split_note": "Use offsets beyond the training trace source ranges to avoid train/eval overlap.",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
         encoding="utf-8",
     )
-    print(f"Wrote {len(records)} records to {out_dir / 'eval_mini_100.jsonl'}", flush=True)
+    print(f"Wrote {len(records)} records to {output_path}", flush=True)
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(0)

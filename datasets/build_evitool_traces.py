@@ -49,6 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ai2d", type=int, default=50)
     parser.add_argument("--max-scan", type=int, default=5000)
     parser.add_argument("--ocr-engine", default="easyocr")
+    parser.add_argument("--screenspot-ocr-fallback", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -202,6 +203,49 @@ def find_answer_evidence_spans(
     return locations
 
 
+def find_option_evidence_spans(
+    answer: Any,
+    answer_letter: str | None,
+    spans: list[dict[str, Any]],
+    evidence_id: str,
+) -> list[dict[str, Any]]:
+    answer_norm = norm_compact(answer)
+    locations: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add_exact(target: str, target_type: str) -> None:
+        target_norm = norm_compact(target)
+        if not target_norm:
+            return
+        for idx, span in enumerate(spans):
+            text = str(span.get("text", ""))
+            if norm_compact(text) != target_norm:
+                continue
+            bbox = span.get("bbox")
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                continue
+            span_id = str(span.get("span_id") or f"ocr_{idx + 1:03d}")
+            if span_id in seen:
+                continue
+            seen.add(span_id)
+            locations.append({
+                "evidence_id": evidence_id,
+                "answer": str(target),
+                "match_type": f"exact_{target_type}",
+                "span_ids": [span_id],
+                "texts": [text],
+                "bbox": [int(float(v)) for v in bbox],
+            })
+
+    if len(answer_norm) <= 2:
+        add_exact(str(answer), "option_text")
+    else:
+        locations.extend(find_answer_evidence_spans([answer], spans, evidence_id, max_window=6))
+    if not locations and answer_letter:
+        add_exact(answer_letter, "option_letter")
+    return locations
+
+
 def safe_observation(observation: dict[str, Any], image_rel: str) -> dict[str, Any]:
     obs = json.loads(json.dumps(observation, ensure_ascii=False))
     obs["image"] = image_rel
@@ -299,7 +343,11 @@ def candidate_recall_tier(recall: dict[str, Any]) -> str:
     return "miss"
 
 
-def build_screenspot(out_dir: Path, limit: int, max_scan: int) -> list[dict[str, Any]]:
+def prefixed_metrics(metrics: dict[str, Any], prefix: str) -> dict[str, Any]:
+    return {f"{prefix}_{key}": value for key, value in metrics.items()}
+
+
+def build_screenspot(out_dir: Path, limit: int, max_scan: int, ocr_engine: str, ocr_fallback: bool) -> list[dict[str, Any]]:
     ds = load_dataset("lmms-lab/ScreenSpot-v2", split="train", streaming=True)
     records = []
     for out_idx, (src_idx, ex) in enumerate(take_stream(ds, limit, max_scan)):
@@ -330,37 +378,85 @@ def build_screenspot(out_dir: Path, limit: int, max_scan: int) -> list[dict[str,
         detect_obs = run_local_tool(image_path, image_rel, detect_action["action"], "ev_001")
         add_candidate_fields(detect_obs)
         detections = detect_obs.get("content", {}).get("detections") or []
-        best, recall = best_gui_candidate(detections, gt_bbox)
+        initial_best, initial_recall = best_gui_candidate(detections, gt_bbox)
+
+        best = initial_best
+        recall = initial_recall
+        selected_detect_obs = detect_obs
+        selected_detect_evidence = "ev_001"
+        fallback_used = False
+        fallback_hit = False
+        fallback_obs = None
+        fallback_action = None
+        fallback_recall: dict[str, Any] = {}
+
+        if (not (best and best.get("hit"))) and ocr_fallback:
+            fallback_used = True
+            fallback_action = action_turn(
+                "Initial UI candidates missed the target, so fuse OCR text boxes with UI candidates.",
+                "detect",
+                {"mode": "ui", "query": instruction, "max_results": 30, "min_area": 20, "include_ocr": True, "ocr_engine": ocr_engine, "ocr_languages": ["en"]},
+            )
+            fallback_obs = run_local_tool(image_path, image_rel, fallback_action["action"], "ev_002")
+            add_candidate_fields(fallback_obs)
+            fallback_detections = fallback_obs.get("content", {}).get("detections") or []
+            fallback_best, fallback_recall = best_gui_candidate(fallback_detections, gt_bbox)
+            if fallback_best and fallback_best.get("hit"):
+                best = fallback_best
+                recall = fallback_recall
+                selected_detect_obs = fallback_obs
+                selected_detect_evidence = "ev_002"
+                fallback_hit = True
 
         if best and best.get("hit"):
             selected_bbox = [int(round(float(x))) for x in best["bbox"]]
-            selected_source = "detected_candidate"
+            selected_source = "detected_candidate_ocr_fallback" if fallback_hit else "detected_candidate"
             selected_candidate_id = best.get("candidate_id")
         else:
             selected_bbox = gt_bbox
             selected_source = "oracle_gt_bbox"
             selected_candidate_id = None
 
+        click_evidence_id = "ev_003" if fallback_used else "ev_002"
         click_args = {"bbox": selected_bbox, "label": instruction}
         click_action = action_turn("Record the selected UI target as a click evidence.", "click", click_args)
-        click_obs = run_local_tool(image_path, image_rel, click_action["action"], "ev_002")
+        click_obs = run_local_tool(image_path, image_rel, click_action["action"], click_evidence_id)
+        final_evidence = ["ev_001"]
+        if fallback_used:
+            final_evidence.append("ev_002")
+        final_evidence.append(click_evidence_id)
         final = final_turn(
-            "ev_001 lists UI candidates and ev_002 records the selected target for the requested instruction.",
-            ["ev_001", "ev_002"],
+            f"{selected_detect_evidence} lists UI candidates used for the selected target; {click_evidence_id} records the target for the requested instruction.",
+            final_evidence,
             center,
         )
         recall_tier = candidate_recall_tier(recall)
+        initial_recall_tier = candidate_recall_tier(initial_recall)
         detect_candidate_hit = bool(best and best.get("hit"))
         oracle_gt_injected = selected_source == "oracle_gt_bbox"
+        miss_reason = "hit_initial"
+        if fallback_hit:
+            miss_reason = "hit_ocr_fallback"
+        elif oracle_gt_injected and fallback_used:
+            miss_reason = "miss_after_ocr_fallback"
+        elif oracle_gt_injected:
+            miss_reason = "miss_no_fallback"
         quality_tags = [
             f"candidate_recall_{recall_tier}",
+            f"initial_candidate_recall_{initial_recall_tier}",
+            "ocr_fallback_used" if fallback_used else "ocr_fallback_not_used",
+            "ocr_fallback_hit" if fallback_hit else "ocr_fallback_no_hit",
             "detected_candidate" if detect_candidate_hit else "candidate_miss",
             "oracle_gt_injected" if oracle_gt_injected else "no_oracle_gt",
         ]
+        trace = [{"action": detect_action, "observation": detect_obs}]
+        if fallback_used and fallback_action is not None and fallback_obs is not None:
+            trace.append({"action": fallback_action, "observation": fallback_obs})
+        trace.append({"action": click_action, "observation": click_obs})
         quality = {
             "evidence_closed": True,
             "strong_evidence": detect_candidate_hit,
-            "tool_sequence": ["detect", "click"],
+            "tool_sequence": [item["action"]["action"]["tool"] for item in trace],
             "quality_tier": f"detected_{recall_tier}" if detect_candidate_hit else "oracle_gt_injected",
             "quality_tags": quality_tags,
             "selected_source": selected_source,
@@ -369,21 +465,24 @@ def build_screenspot(out_dir: Path, limit: int, max_scan: int) -> list[dict[str,
             "selected_iou_with_gt": bbox_iou(selected_bbox, gt_bbox),
             "selected_pointing": point_in_bbox(bbox_center(selected_bbox), gt_bbox),
             "final_pointing": point_in_bbox(center, gt_bbox),
-            "candidate_count": len(detections),
-            "candidate_pool_size": detect_obs.get("content", {}).get("candidate_pool_size"),
-            "candidate_source_counts": detect_obs.get("content", {}).get("candidate_sources"),
+            "candidate_count": len(selected_detect_obs.get("content", {}).get("detections") or []),
+            "candidate_pool_size": selected_detect_obs.get("content", {}).get("candidate_pool_size"),
+            "candidate_source_counts": selected_detect_obs.get("content", {}).get("candidate_sources"),
             "best_candidate_rank": best.get("rank") if best else None,
             "best_candidate_iou": best.get("iou_with_gt") if best else 0.0,
             "best_candidate_center_in_gt": best.get("center_in_gt") if best else False,
             "detect_candidate_hit": detect_candidate_hit,
             "candidate_recall_tier": recall_tier,
+            "initial_candidate_recall_tier": initial_recall_tier,
+            "ocr_fallback_used": fallback_used,
+            "ocr_fallback_hit": fallback_hit,
+            "miss_reason": miss_reason,
             "oracle_gt_injected": oracle_gt_injected,
             **recall,
+            **prefixed_metrics(initial_recall, "initial"),
+            **(prefixed_metrics(fallback_recall, "fallback") if fallback_recall else {}),
         }
-        records.append(make_record(row=row, image_rel=image_rel, trace=[
-            {"action": detect_action, "observation": detect_obs},
-            {"action": click_action, "observation": click_obs},
-        ], final=final, quality=quality))
+        records.append(make_record(row=row, image_rel=image_rel, trace=trace, final=final, quality=quality))
     return records
 
 
@@ -515,7 +614,7 @@ def build_chartqa(out_dir: Path, limit: int, max_scan: int, ocr_engine: str) -> 
     return records
 
 
-def build_ai2d(out_dir: Path, limit: int, max_scan: int) -> list[dict[str, Any]]:
+def build_ai2d(out_dir: Path, limit: int, max_scan: int, ocr_engine: str) -> list[dict[str, Any]]:
     ds = load_dataset("lmms-lab/ai2d", split="test", streaming=True)
     records = []
     for out_idx, (src_idx, ex) in enumerate(take_stream(ds, limit, max_scan)):
@@ -547,16 +646,63 @@ def build_ai2d(out_dir: Path, limit: int, max_scan: int) -> list[dict[str, Any]]
         }
         inspect_action = action_turn("Inspect the diagram metadata and visual density before choosing the option.", "inspect", {})
         inspect_obs = run_local_tool(image_path, image_rel, inspect_action["action"], "ev_001")
+        diagram_action = action_turn("Detect diagram regions, labels, and line-art candidates before choosing the option.", "detect", {"mode": "diagram", "query": question, "max_results": 40, "min_area": 20})
+        diagram_obs = run_local_tool(image_path, image_rel, diagram_action["action"], "ev_002")
+        add_candidate_fields(diagram_obs)
+        ocr_action = action_turn("Read diagram labels and option text with OCR.", "ocr", {"engine": ocr_engine, "languages": ["en"], "max_regions": 100})
+        ocr_obs = run_local_tool(image_path, image_rel, ocr_action["action"], "ev_003")
+        add_ocr_span_fields(ocr_obs)
+        spans = ocr_obs.get("content", {}).get("spans") or []
+        answer_locations = find_option_evidence_spans(answer, answer_letter, spans, "ev_003")
+        answer_position_found = bool(answer_locations)
+        diagram_candidate_count = int(diagram_obs.get("content", {}).get("count") or 0)
+        diagram_evidence = diagram_candidate_count > 0
+        ocr_available = bool(ocr_obs.get("content", {}).get("available"))
         final_answer = answer_letter or answer
-        final = final_turn("ev_001 confirms the diagram was inspected; the answer follows the dataset option label.", ["ev_001"], final_answer)
+        if answer_position_found:
+            step = "ev_002 provides diagram structure candidates and ev_003 localizes the correct option/label text."
+        elif diagram_evidence or ocr_available:
+            step = "ev_002/ev_003 provide diagram structure or OCR evidence, but the correct option was not localized."
+        else:
+            step = "ev_001 confirms the diagram was inspected; the answer follows the dataset option label."
+        final = final_turn(step, ["ev_001", "ev_002", "ev_003"], final_answer)
+        if answer_position_found and diagram_evidence:
+            quality_tier = "answer_option_localized_with_diagram_structure"
+        elif answer_position_found:
+            quality_tier = "answer_option_localized"
+        elif diagram_evidence or ocr_available:
+            quality_tier = "diagram_or_ocr_evidence_only"
+        else:
+            quality_tier = "protocol_only"
+        quality_tags = [
+            "diagram_candidates_detected" if diagram_evidence else "diagram_candidates_missing",
+            "ocr_available" if ocr_available else "ocr_unavailable",
+            "answer_option_position_found" if answer_position_found else "answer_option_position_missing",
+        ]
         quality = {
             "evidence_closed": True,
-            "tool_sequence": ["inspect"],
+            "tool_sequence": ["inspect", "detect", "ocr"],
+            "quality_tier": quality_tier,
+            "quality_tags": quality_tags,
             "option_count": len(options),
             "answer_letter_available": answer_letter is not None,
-            "strong_evidence": False,
+            "diagram_candidate_count": diagram_candidate_count,
+            "diagram_candidate_pool_size": diagram_obs.get("content", {}).get("candidate_pool_size"),
+            "diagram_candidate_source_counts": diagram_obs.get("content", {}).get("candidate_sources"),
+            "diagram_structure_evidence": diagram_evidence,
+            "ocr_available": ocr_available,
+            "ocr_span_count": len(spans),
+            "answer_option_evidence_position_found": answer_position_found,
+            "answer_option_evidence_span_count": sum(len(item.get("span_ids", [])) for item in answer_locations),
+            "answer_option_evidence_locations": answer_locations,
+            "moderate_evidence": bool(answer_position_found or diagram_evidence or ocr_available),
+            "strong_evidence": answer_position_found,
         }
-        records.append(make_record(row=row, image_rel=image_rel, trace=[{"action": inspect_action, "observation": inspect_obs}], final=final, quality=quality))
+        records.append(make_record(row=row, image_rel=image_rel, trace=[
+            {"action": inspect_action, "observation": inspect_obs},
+            {"action": diagram_action, "observation": diagram_obs},
+            {"action": ocr_action, "observation": ocr_obs},
+        ], final=final, quality=quality))
     return records
 
 
@@ -591,6 +737,10 @@ def summarize(records: list[dict[str, Any]], elapsed_sec: float) -> dict[str, An
                 "avg_selected_iou": mean([q.get("selected_iou_with_gt", 0.0) for q in qualities]),
                 "avg_candidate_count": mean([q.get("candidate_count", 0) for q in qualities]),
                 "avg_candidate_pool_size": mean([q.get("candidate_pool_size", 0) or 0 for q in qualities]),
+                "initial_candidate_recall_at_30": mean([q.get("initial_candidate_recall_at_30", False) for q in qualities]),
+                "ocr_fallback_used_rate": mean([q.get("ocr_fallback_used", False) for q in qualities]),
+                "ocr_fallback_hit_rate": mean([q.get("ocr_fallback_hit", False) for q in qualities]),
+                "miss_after_fallback_rate": mean([q.get("miss_reason") == "miss_after_ocr_fallback" for q in qualities]),
             })
         if task in {"doc_qa", "chart_qa"}:
             task_summary[task].update({
@@ -604,6 +754,15 @@ def summarize(records: list[dict[str, Any]], elapsed_sec: float) -> dict[str, An
             task_summary[task]["avg_bar_candidates"] = mean([q.get("bar_candidate_count", 0) for q in qualities])
             task_summary[task]["chart_structure_evidence_rate"] = mean([q.get("chart_structure_evidence", False) for q in qualities])
             task_summary[task]["chart_structure_only_rate"] = mean([q.get("quality_tier") == "chart_structure_only" for q in qualities])
+        if task == "science_diagram_qa":
+            task_summary[task].update({
+                "moderate_evidence_rate": mean([q.get("moderate_evidence", False) for q in qualities]),
+                "diagram_structure_evidence_rate": mean([q.get("diagram_structure_evidence", False) for q in qualities]),
+                "answer_option_evidence_position_rate": mean([q.get("answer_option_evidence_position_found", False) for q in qualities]),
+                "ocr_available_rate": mean([q.get("ocr_available", False) for q in qualities]),
+                "avg_ocr_spans": mean([q.get("ocr_span_count", 0) for q in qualities]),
+                "avg_diagram_candidates": mean([q.get("diagram_candidate_count", 0) for q in qualities]),
+            })
 
     all_quality = [record["quality"] for record in records]
     return {
@@ -656,10 +815,10 @@ def write_report(path: Path, summary: dict[str, Any], records_path: str) -> None
         "",
         "本数据集没有使用远程 teacher 模型生成答案标签。答案、选项和 GUI bbox 来自公开数据集原始标注；视觉证据来自本地 EviTool 工具实际执行结果。",
         "",
-        "- ScreenSpot-v2：使用融合版 `detect(mode=ui)` 生成 UI 边缘、矩形控件、文本视觉区、图标和布局候选；候选召回失败时注入 GT bbox 作为 bootstrap oracle trace，并在 `quality.selected_source` / `quality.oracle_gt_injected` 中标明。",
+        "- ScreenSpot-v2：使用融合版 `detect(mode=ui)` 生成 UI 边缘、矩形控件、文本视觉区、图标、布局和 query-aware 小图标先验候选；初次召回失败时可启用 OCR fallback，仍失败时注入 GT bbox 作为 bootstrap oracle trace。",
         f"- DocVQA：使用 `ocr(engine={summary.get('ocr_engine', 'easyocr' )})` 读取页面文本，最终答案来自 DocVQA 标注；`answer_in_ocr` 衡量本地 OCR 是否召回答案，`answer_evidence_locations` 保存支持答案的 OCR span 位置。",
         "- ChartQA：使用 `detect(mode=bar)` 获取图表结构候选，并用 OCR 读取文本/数字；`bar_candidate_count` 仅表示结构候选，强证据优先由答案 OCR span 位置决定。",
-        "- AI2D：使用 `inspect` 建立最小工具协议 trace，答案来自多选标注。该子集主要用于训练协议格式，不作为强视觉证据子集。",
+        "- AI2D：使用 `inspect`、`detect(mode=diagram)` 和 OCR 生成图示结构与文本证据；当正确选项/标签能定位到 OCR span 时标为强证据，否则按 diagram/OCR 可用性标为 moderate evidence。",
         "",
         "每条样本均保存 user、assistant action、tool observation、assistant final 的 action-observation-final 消息序列，并保存结构化 `trace/final/quality` 字段。",
         "",
@@ -680,11 +839,14 @@ def write_report(path: Path, summary: dict[str, Any], records_path: str) -> None
             f"- Oracle GT 注入比例：{pct(gui.get('oracle_gt_injected_rate'))}",
             f"- 平均候选数：{gui.get('avg_candidate_count', 0.0):.3f}",
             f"- 平均融合候选池：{gui.get('avg_candidate_pool_size', 0.0):.3f}",
+            f"- Initial Recall@30：{pct(gui.get('initial_candidate_recall_at_30'))}",
+            f"- OCR Fallback 使用率：{pct(gui.get('ocr_fallback_used_rate'))}",
+            f"- OCR Fallback 命中率：{pct(gui.get('ocr_fallback_hit_rate'))}",
             f"- Final Pointing Rate：{pct(gui.get('final_pointing_rate'))}",
             f"- Selected Pointing Rate：{pct(gui.get('selected_pointing_rate'))}",
             f"- 平均 selected IoU：{gui.get('avg_selected_iou', 0.0):.4f}",
             "",
-            "解释：Candidate recall 反映当前本地 `detect(ui)` 是否能把 GT 目标放进候选集；Detected Candidate Rate 是无需注入 GT 的样本比例；Oracle GT 注入比例越高，说明 detect 工具仍需增强。Final pointing 使用 GT center，因此用于训练 click/point 协议，不能当作模型推理成绩。",
+            "解释：Candidate recall 反映当前本地 `detect(ui)` 是否能把 GT 目标放进候选集；Detected Candidate Rate 是无需注入 GT 的样本比例；OCR fallback 指初次候选 miss 后启用 OCR 融合的补救路径；Oracle GT 注入比例越高，说明 detect 工具仍需增强。Final pointing 使用 GT center，因此用于训练 click/point 协议，不能当作模型推理成绩。",
             "",
         ])
     for task in ("doc_qa", "chart_qa"):
@@ -704,10 +866,23 @@ def write_report(path: Path, summary: dict[str, Any], records_path: str) -> None
                 lines.append(f"- Chart Structure Evidence Rate：{pct(item.get('chart_structure_evidence_rate'))}")
                 lines.append(f"- Chart Structure Only Rate：{pct(item.get('chart_structure_only_rate'))}")
             lines.append("")
+    if "science_diagram_qa" in by:
+        item = by["science_diagram_qa"]
+        lines.extend([
+            "### 3.3 science_diagram_qa",
+            "",
+            f"- Moderate Evidence Rate：{pct(item.get('moderate_evidence_rate'))}",
+            f"- Answer Option Evidence Position Rate：{pct(item.get('answer_option_evidence_position_rate'))}",
+            f"- Diagram Structure Evidence Rate：{pct(item.get('diagram_structure_evidence_rate'))}",
+            f"- OCR 可用率：{pct(item.get('ocr_available_rate'))}",
+            f"- 平均 OCR spans：{item.get('avg_ocr_spans', 0.0):.3f}",
+            f"- 平均 diagram candidates：{item.get('avg_diagram_candidates', 0.0):.3f}",
+            "",
+        ])
     lines.extend([
         "## 4. 使用建议",
         "",
-        "第一轮 SFT 建议优先使用 GUI 中 `oracle_gt_injected=false` 的样本，以及 DocVQA/ChartQA 中 `answer_evidence_position_found=true` 的强证据子集。AI2D 与弱 OCR 样本可用于协议格式训练，但不应在论文中声称其每个视觉推理步骤都被强证据完全支持。",
+        "第一轮 SFT 建议优先使用 GUI 中 `oracle_gt_injected=false` 的样本、DocVQA/ChartQA 中 `answer_evidence_position_found=true` 的强证据子集，以及 AI2D 中 `answer_option_evidence_position_found=true` 的图示强证据子集。其余 AI2D moderate 样本可用于协议格式和粗粒度图示证据训练。",
         "",
         "下一步应重新构建数据集并观察 Candidate Recall@K、Oracle GT 注入比例、Answer Evidence Position Rate。之后再用允许的强模型做少量 hard case trace repair，而不是全量 teacher 生成。",
         "",
@@ -734,10 +909,10 @@ def main() -> int:
 
     started = time.time()
     builders = [
-        ("screenspot", args.screenspot, lambda: build_screenspot(out_dir, args.screenspot, args.max_scan)),
+        ("screenspot", args.screenspot, lambda: build_screenspot(out_dir, args.screenspot, args.max_scan, args.ocr_engine, args.screenspot_ocr_fallback)),
         ("docvqa", args.docvqa, lambda: build_docvqa(out_dir, args.docvqa, args.max_scan, args.ocr_engine)),
         ("chartqa", args.chartqa, lambda: build_chartqa(out_dir, args.chartqa, args.max_scan, args.ocr_engine)),
-        ("ai2d", args.ai2d, lambda: build_ai2d(out_dir, args.ai2d, args.max_scan)),
+        ("ai2d", args.ai2d, lambda: build_ai2d(out_dir, args.ai2d, args.max_scan, args.ocr_engine)),
     ]
 
     records: list[dict[str, Any]] = []

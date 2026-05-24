@@ -19,7 +19,7 @@ Supported tools:
 | `crop` | Crop a region and optionally save it. |
 | `zoom` | Crop then resize a region. |
 | `ocr` | Read text with optional PaddleOCR/EasyOCR/Tesseract backends; falls back to text-like candidate boxes. |
-| `detect` | Detect layout, text, fused UI candidates, chart bars, or color regions with OpenCV heuristics; `mode="ui"` can optionally fuse OCR boxes with `include_ocr=true`. |
+| `detect` | Detect layout, text, fused UI candidates, diagram regions, chart bars, or color regions with OpenCV heuristics; `mode="ui"` supports query-aware icon priors and can optionally fuse OCR boxes with `include_ocr=true`. |
 | `measure` | Measure bbox sizes, centers, relative positions, distances, and bar heights. |
 | `mark` / `visualize` | Draw boxes and points on an image. |
 | `trace` | Execute a list of tool actions and return evidence observations. |

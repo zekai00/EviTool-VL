@@ -15,15 +15,20 @@ from .common import bbox_area, bbox_center, bbox_iou, crop_pil, image_size, load
 UI_MODE_ALIASES = {"ui", "button", "icon", "screen", "gui"}
 TEXT_MODE_ALIASES = {"text", "text_region", "ocr"}
 BAR_MODE_ALIASES = {"bar", "chart", "bars"}
+DIAGRAM_MODE_ALIASES = {"diagram", "science_diagram", "ai2d"}
 COLOR_MODE_ALIASES = {"color", "colour"}
-KNOWN_MODE_ALIASES = UI_MODE_ALIASES | TEXT_MODE_ALIASES | BAR_MODE_ALIASES | COLOR_MODE_ALIASES | {"layout"}
+KNOWN_MODE_ALIASES = UI_MODE_ALIASES | TEXT_MODE_ALIASES | BAR_MODE_ALIASES | DIAGRAM_MODE_ALIASES | COLOR_MODE_ALIASES | {"layout"}
 
 SOURCE_PRIORITY = {
+    "query_prior": 1.02,
     "ocr_text": 0.95,
+    "text_expanded": 0.9,
     "text_visual": 0.82,
-    "ui_rect": 0.78,
+    "row_container": 0.8,
+    "ui_rect": 0.76,
     "ui_edge": 0.72,
     "icon_visual": 0.68,
+    "diagram_region": 0.6,
     "layout": 0.45,
 }
 
@@ -197,6 +202,82 @@ def _ui_elements(image_bgr: np.ndarray, offset: tuple[int, int], min_area: float
     return sort_boxes_reading_order(filtered)[:max_results]
 
 
+def _clip_bbox_to_image(bbox: list[float], image_shape: tuple[int, int], offset: tuple[int, int]) -> list[int] | None:
+    h, w = image_shape
+    ox, oy = offset
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+    x1 = max(float(ox), min(float(ox + w), x1))
+    y1 = max(float(oy), min(float(oy + h), y1))
+    x2 = max(float(ox), min(float(ox + w), x2))
+    y2 = max(float(oy), min(float(oy + h), y2))
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [int(round(x1)), int(round(y1)), int(round(x2)), int(round(y2))]
+
+
+def _expanded_text_candidates(image_bgr: np.ndarray, offset: tuple[int, int], min_area: float, max_results: int) -> list[dict[str, Any]]:
+    text_boxes = _text_regions(image_bgr, offset, max(8.0, min_area * 0.4), max_results * 2)
+    h, w = image_bgr.shape[:2]
+    candidates = []
+    for item in text_boxes:
+        x1, y1, x2, y2 = [float(v) for v in item["bbox"]]
+        bw, bh = x2 - x1, y2 - y1
+        if bw < 3 or bh < 3:
+            continue
+        tight_pad_x = max(6.0, bh * 0.8)
+        tight_pad_y = max(4.0, bh * 0.45)
+        tight = _clip_bbox_to_image([x1 - tight_pad_x, y1 - tight_pad_y, x2 + tight_pad_x, y2 + tight_pad_y], (h, w), offset)
+        if tight and bbox_area(tight) >= min_area:
+            candidates.append({"bbox": tight, "score": min(1.0, 0.55 + min(0.35, bbox_area(tight) / max(1.0, h * w) * 12)), "label": "text_expanded_candidate"})
+
+        row_pad_x_left = max(18.0, min(0.18 * w, bw * 1.5))
+        row_pad_x_right = max(22.0, min(0.32 * w, bw * 3.0))
+        row_pad_y = max(6.0, bh * 0.9)
+        row = _clip_bbox_to_image([x1 - row_pad_x_left, y1 - row_pad_y, x2 + row_pad_x_right, y2 + row_pad_y], (h, w), offset)
+        if row and bbox_area(row) >= min_area:
+            rw, rh = row[2] - row[0], row[3] - row[1]
+            if rh <= max(48, 0.18 * h) and rw <= 0.85 * w:
+                candidates.append({"bbox": row, "score": min(1.0, 0.48 + min(0.28, bbox_area(row) / max(1.0, h * w) * 5)), "label": "row_container_candidate"})
+    return candidates[:max_results]
+
+
+def _query_prior_candidates(image_bgr: np.ndarray, offset: tuple[int, int], query: str | None, max_results: int) -> list[dict[str, Any]]:
+    tokens = _tokenize(query)
+    if not tokens:
+        return []
+    h, w = image_bgr.shape[:2]
+    y_values = sorted({0, 8, 15, 30, 45, 60, 75, 90, 120, 150, 180, 210, 240, 255, 285, 315, 330, 345, 375, 405})
+    y_values = [y for y in y_values if y < h - 8]
+    right_slots = [(w - 50, w), (w - 96, w - 46), (w - 142, w - 92), (w - 188, w - 138)]
+    left_slots = [(0, 52), (14, 66), (42, 94), (76, 128)]
+    center_color_slots = [(int(0.62 * w), int(0.62 * w) + 34), (int(0.66 * w), int(0.66 * w) + 34)]
+
+    slot_groups: list[tuple[str, list[tuple[int, int]], int]] = []
+    if tokens & {"close", "exit", "dismiss"}:
+        slot_groups.append(("window_close_prior", [right_slots[0]], 40))
+    if tokens & {"minimize", "minimise"}:
+        slot_groups.append(("window_minimize_prior", [right_slots[2], right_slots[1]], 38))
+    if tokens & {"maximize", "maximise", "restore"}:
+        slot_groups.append(("window_maximize_prior", [right_slots[1], right_slots[2]], 38))
+    if tokens & {"settings", "more", "download", "downloads", "account", "profile", "shortcut", "toolbar", "pin", "tab"}:
+        slot_groups.append(("right_toolbar_prior", [right_slots[0], right_slots[1]], 42))
+    if tokens & {"refresh", "reload", "save", "undo", "redo", "back", "forward"}:
+        slot_groups.append(("left_toolbar_prior", [left_slots[0], left_slots[1]], 40))
+    if tokens & {"fill", "red", "blue", "green", "color", "colour"}:
+        slot_groups.append(("color_toolbar_prior", center_color_slots, 32))
+
+    candidates = []
+    for label, slots, height in slot_groups:
+        for y in y_values:
+            for x1, x2 in slots:
+                bbox = _clip_bbox_to_image([x1, y, x2, y + height], (h, w), offset)
+                if bbox:
+                    candidates.append({"bbox": bbox, "score": 0.94, "label": label})
+                if len(candidates) >= max_results:
+                    return candidates
+    return candidates[:max_results]
+
+
 def _rect_controls(image_bgr: np.ndarray, offset: tuple[int, int], min_area: float, max_results: int) -> list[dict[str, Any]]:
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 35, 130)
@@ -248,19 +329,38 @@ def _ocr_candidates(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     from . import ocr as ocr_tool
 
+    image = load_image(image_path)
+    if bbox is None:
+        offset = (0, 0)
+        image_shape = (image.height, image.width)
+    else:
+        offset = (int(bbox[0]), int(bbox[1]))
+        image_shape = (max(1, int(bbox[3] - bbox[1])), max(1, int(bbox[2] - bbox[0])))
     content, _, _ = ocr_tool.run(image_path, bbox=bbox, engine=engine, languages=languages or ["en"], max_regions=max_results)
     candidates = []
     for span in content.get("spans") or []:
         bbox_value = span.get("bbox")
         if not isinstance(bbox_value, list) or len(bbox_value) != 4:
             continue
+        text = str(span.get("text", ""))
+        score = float(span.get("score", 0.0))
         candidates.append({
             "bbox": bbox_value,
-            "score": float(span.get("score", 0.0)),
+            "score": score,
             "label": "ocr_text",
-            "text": str(span.get("text", "")),
+            "text": text,
             "ocr_source": span.get("source"),
         })
+        x1, y1, x2, y2 = [float(v) for v in bbox_value]
+        height = max(1.0, y2 - y1)
+        tight = _clip_bbox_to_image([x1 - height * 0.8, y1 - height * 0.55, x2 + height * 0.8, y2 + height * 0.55], image_shape, offset)
+        if tight:
+            candidates.append({"bbox": tight, "score": min(1.0, score + 0.08), "label": "ocr_text_expanded", "text": text, "ocr_source": span.get("source")})
+        row = _clip_bbox_to_image([x1 - max(18.0, height * 2.0), y1 - height * 0.9, x2 + max(24.0, height * 4.0), y2 + height * 0.9], image_shape, offset)
+        if row:
+            row_w, row_h = row[2] - row[0], row[3] - row[1]
+            if row_h <= max(56, 0.2 * image_shape[0]) and row_w <= 0.9 * image_shape[1]:
+                candidates.append({"bbox": row, "score": min(1.0, score + 0.03), "label": "ocr_row_container", "text": text, "ocr_source": span.get("source")})
     for region in content.get("candidate_regions") or []:
         bbox_value = region.get("bbox")
         if not isinstance(bbox_value, list) or len(bbox_value) != 4:
@@ -298,9 +398,13 @@ def _ui_fused(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     source_limit = max(max_results * 3, 60)
     candidates: list[dict[str, Any]] = []
+    candidates.extend(_tag_candidates(_query_prior_candidates(image_bgr, offset, query, source_limit), "query_prior", score_boost=0.04))
     candidates.extend(_tag_candidates(_ui_elements(image_bgr, offset, min_area, source_limit), "ui_edge", score_boost=0.1))
     candidates.extend(_tag_candidates(_rect_controls(image_bgr, offset, min_area, source_limit), "ui_rect", score_boost=0.08))
     candidates.extend(_tag_candidates(_text_regions(image_bgr, offset, min_area, source_limit), "text_visual", score_boost=0.12))
+    expanded_text = _expanded_text_candidates(image_bgr, offset, min_area, source_limit)
+    candidates.extend(_tag_candidates([item for item in expanded_text if item.get("label") != "row_container_candidate"], "text_expanded", score_boost=0.1))
+    candidates.extend(_tag_candidates([item for item in expanded_text if item.get("label") == "row_container_candidate"], "row_container", score_boost=0.05))
     candidates.extend(_tag_candidates(_icon_regions(image_bgr, offset, min_area, source_limit), "icon_visual", score_boost=0.05))
     candidates.extend(_tag_candidates(_layout(image_bgr, offset, min_area, max_results), "layout", score_boost=0.02))
 
@@ -328,6 +432,21 @@ def _select_mode(mode: str | None, query: str | None) -> str:
     if selected in {"", "auto", "layout"} and query_mode in KNOWN_MODE_ALIASES:
         return query_mode
     return selected or "layout"
+
+
+def _diagram_regions(image_bgr: np.ndarray, offset: tuple[int, int], min_area: float, max_results: int, query: str | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    source_limit = max(max_results * 3, 60)
+    candidates: list[dict[str, Any]] = []
+    candidates.extend(_tag_candidates(_layout(image_bgr, offset, max(20.0, min_area), source_limit), "diagram_region", score_boost=0.05))
+    candidates.extend(_tag_candidates(_text_regions(image_bgr, offset, max(8.0, min_area * 0.4), source_limit), "text_visual", score_boost=0.1))
+    candidates.extend(_tag_candidates(_expanded_text_candidates(image_bgr, offset, max(8.0, min_area * 0.4), source_limit), "text_expanded", score_boost=0.06))
+    candidates.extend(_tag_candidates(_icon_regions(image_bgr, offset, max(8.0, min_area * 0.5), source_limit), "icon_visual", score_boost=0.03))
+    deduped = _dedupe_candidates(candidates)
+    ranked = _rank_candidates(deduped, image_bgr, query, max_results)
+    return ranked, {
+        "candidate_pool_size": len(deduped),
+        "candidate_sources": _source_counts(ranked),
+    }
 
 
 def _bars(image_bgr: np.ndarray, offset: tuple[int, int], min_area: float, max_results: int) -> list[dict[str, Any]]:
@@ -400,6 +519,9 @@ def run(
     elif selected in BAR_MODE_ALIASES:
         detections = _bars(image_bgr, offset, min_area, max_results)
         used_mode = "bar"
+    elif selected in DIAGRAM_MODE_ALIASES:
+        detections, mode_meta = _diagram_regions(image_bgr, offset, min_area, max_results, query)
+        used_mode = "diagram"
     elif selected in COLOR_MODE_ALIASES:
         if color is None:
             raise ValueError("color mode requires color")

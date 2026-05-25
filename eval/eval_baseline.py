@@ -87,11 +87,22 @@ def load_model(model_name_or_path: str, adapter_name_or_path: str | None = None)
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
     kwargs = {"dtype": dtype, "device_map": "auto", "trust_remote_code": True}
 
+    def patch_autoawq_transformers_compat() -> None:
+        """Keep old AutoAWQ import paths working with newer transformers."""
+        import transformers.activations as activations
+
+        if not hasattr(activations, "PytorchGELUTanh"):
+            if hasattr(activations, "PytorchGELUTanhActivation"):
+                activations.PytorchGELUTanh = activations.PytorchGELUTanhActivation
+            else:
+                activations.PytorchGELUTanh = activations.GELUActivation
+
     if "qwen3" in lower_name:
         if Qwen3VLForConditionalGeneration is None:
             raise RuntimeError("Current transformers does not expose Qwen3VLForConditionalGeneration.")
         model = Qwen3VLForConditionalGeneration.from_pretrained(model_name_or_path, **kwargs)
         if adapter_name_or_path:
+            patch_autoawq_transformers_compat()
             from peft import PeftModel
 
             model = PeftModel.from_pretrained(model, adapter_name_or_path)
@@ -101,6 +112,7 @@ def load_model(model_name_or_path: str, adapter_name_or_path: str | None = None)
         raise RuntimeError("Current transformers does not expose Qwen2_5_VLForConditionalGeneration.")
     model = Qwen2_5_VLForConditionalGeneration.from_pretrained(model_name_or_path, **kwargs)
     if adapter_name_or_path:
+        patch_autoawq_transformers_compat()
         from peft import PeftModel
 
         model = PeftModel.from_pretrained(model, adapter_name_or_path)

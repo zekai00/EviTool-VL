@@ -28,6 +28,7 @@ SOURCE_PRIORITY = {
     "ui_rect": 0.76,
     "ui_edge": 0.72,
     "icon_visual": 0.68,
+    "omniparser": 0.78,
     "diagram_region": 0.6,
     "layout": 0.45,
 }
@@ -395,6 +396,11 @@ def _ui_fused(
     include_ocr: bool,
     ocr_engine: str,
     ocr_languages: list[str] | None,
+    include_omniparser: bool = False,
+    external_cache_dir: str | Path | None = None,
+    omniparser_root: str | Path | None = None,
+    omniparser_weights_dir: str | Path | None = None,
+    omniparser_use_caption: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     source_limit = max(max_results * 3, 60)
     candidates: list[dict[str, Any]] = []
@@ -407,6 +413,31 @@ def _ui_fused(
     candidates.extend(_tag_candidates([item for item in expanded_text if item.get("label") == "row_container_candidate"], "row_container", score_boost=0.05))
     candidates.extend(_tag_candidates(_icon_regions(image_bgr, offset, min_area, source_limit), "icon_visual", score_boost=0.05))
     candidates.extend(_tag_candidates(_layout(image_bgr, offset, min_area, max_results), "layout", score_boost=0.02))
+
+    external_meta: dict[str, Any] = {"external_fused": False}
+    if include_omniparser:
+        try:
+            from .external_detectors import run_external_detectors
+
+            external_items, external_meta = run_external_detectors(
+                image_path,
+                providers=["omniparser"],
+                max_results=source_limit,
+                cache_dir=external_cache_dir,
+                omniparser_root=omniparser_root,
+                omniparser_weights_dir=omniparser_weights_dir,
+                omniparser_use_caption=omniparser_use_caption,
+            )
+            external_meta["external_requested"] = True
+            external_meta["external_fused"] = bool(external_items)
+            by_source: dict[str, list[dict[str, Any]]] = {}
+            for item in external_items:
+                source = str(item.get("source") or item.get("external_provider") or "external")
+                by_source.setdefault(source, []).append(item)
+            for source, items in by_source.items():
+                candidates.extend(_tag_candidates(items, source, score_boost=0.07))
+        except Exception as exc:
+            external_meta = {"external_fused": False, "external_error": f"{type(exc).__name__}: {exc}"}
 
     ocr_meta: dict[str, Any] = {"ocr_fused": False}
     if include_ocr:
@@ -423,6 +454,7 @@ def _ui_fused(
         "candidate_pool_size": len(deduped),
         "candidate_sources": _source_counts(ranked),
         **ocr_meta,
+        "external": external_meta,
     }
 
 
@@ -492,6 +524,11 @@ def run(
     include_ocr: bool = False,
     ocr_engine: str = "auto",
     ocr_languages: list[str] | None = None,
+    include_omniparser: bool = False,
+    external_cache_dir: str | Path | None = None,
+    omniparser_root: str | Path | None = None,
+    omniparser_weights_dir: str | Path | None = None,
+    omniparser_use_caption: bool = False,
     **_: Any,
 ) -> tuple[dict[str, Any], dict[str, Any], list[int] | None]:
     image = load_image(image_path)
@@ -514,6 +551,11 @@ def run(
             include_ocr=include_ocr,
             ocr_engine=ocr_engine,
             ocr_languages=ocr_languages,
+            include_omniparser=include_omniparser,
+            external_cache_dir=external_cache_dir,
+            omniparser_root=omniparser_root,
+            omniparser_weights_dir=omniparser_weights_dir,
+            omniparser_use_caption=omniparser_use_caption,
         )
         used_mode = "ui"
     elif selected in BAR_MODE_ALIASES:

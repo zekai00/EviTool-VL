@@ -1,0 +1,45 @@
+### model
+model_name_or_path: /root/models/Qwen3-VL-4B-Instruct
+image_max_pixels: 262144
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+quantization_bit: 4
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
+lora_target: all
+freeze_vision_tower: true
+
+### dataset
+dataset_dir: /root/models/datasets/evitool_sft_v2
+dataset: evitool_sft_tool_gui_v2
+template: qwen3_vl_nothink
+cutoff_len: 8192
+max_samples: 1000
+preprocessing_num_workers: 8
+dataloader_num_workers: 2
+
+### output
+output_dir: checkpoints/qwen3vl_4b_evitool_sft_v2_tool_gui_lora
+logging_steps: 5
+save_steps: 50
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+report_to: none
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 32
+learning_rate: 5.0e-5
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+bf16: true
+gradient_checkpointing: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null

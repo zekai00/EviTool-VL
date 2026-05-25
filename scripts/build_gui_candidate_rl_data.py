@@ -17,7 +17,9 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from rl.gui_candidate_env import (
     draw_candidate_overlay,
+    generate_fused_ui_candidates,
     generate_omniparser_candidates,
+    instruction_text,
     load_gui_rows,
     oracle_candidate,
     summarize_candidate_records,
@@ -31,6 +33,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="outputs/gui_candidate_rl")
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--max-candidates", type=int, default=30)
+    parser.add_argument(
+        "--generator",
+        choices=("omniparser", "fused-ui"),
+        default="omniparser",
+        help=(
+            "`omniparser` keeps the original icon-only candidate source. "
+            "`fused-ui` adds OCR/text/layout/UI candidates and can also fuse OmniParser."
+        ),
+    )
+    parser.add_argument("--min-area", type=float, default=20.0, help="Minimum area for non-OmniParser fused UI candidates.")
+    parser.add_argument("--ocr-engine", default="easyocr", help="OCR backend passed to tools.detect when --generator fused-ui.")
+    parser.add_argument(
+        "--include-ocr",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fuse OCR/text candidates when --generator fused-ui.",
+    )
+    parser.add_argument(
+        "--include-omniparser",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fuse OmniParser candidates when --generator fused-ui.",
+    )
+    parser.add_argument(
+        "--query-aware",
+        action="store_true",
+        help=(
+            "Let fused-ui ranking use each instruction as query. This can improve "
+            "ranking but disables screenshot-level cache reuse across different targets."
+        ),
+    )
     parser.add_argument("--val-ratio", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -112,19 +145,38 @@ def main() -> int:
 
     for idx, row in enumerate(rows, start=1):
         image_path = Path(args.image_root) / str(row["image"])
+        # OmniParser and query-unaware fused UI candidates depend only on image
+        # pixels, so rows from the same screenshot can safely share candidates.
+        # Query-aware fused ranking depends on the instruction and must include
+        # it in the cache key.
         image_cache_key = str(image_path.resolve())
+        if args.generator == "fused-ui" and args.query_aware:
+            image_cache_key += f"::{instruction_text(row)}"
         cached = candidate_cache.get(image_cache_key)
         if cached is None:
-            # OmniParser candidates depend only on the screenshot, not on the
-            # natural-language instruction.  OS-Atlas often has several target
-            # elements per screenshot, so caching avoids repeatedly running the
-            # detector on identical pixels.
-            candidates, meta = generate_omniparser_candidates(
-                image_path,
-                max_candidates=args.max_candidates,
-                omniparser_root=args.omniparser_root,
-                omniparser_weights_dir=args.omniparser_weights_dir,
-            )
+            if args.generator == "omniparser":
+                # OmniParser candidates depend only on the screenshot, not on
+                # the natural-language instruction.  OS-Atlas often has several
+                # target elements per screenshot, so caching avoids repeatedly
+                # running the detector on identical pixels.
+                candidates, meta = generate_omniparser_candidates(
+                    image_path,
+                    max_candidates=args.max_candidates,
+                    omniparser_root=args.omniparser_root,
+                    omniparser_weights_dir=args.omniparser_weights_dir,
+                )
+            else:
+                candidates, meta = generate_fused_ui_candidates(
+                    image_path,
+                    max_candidates=args.max_candidates,
+                    query=instruction_text(row) if args.query_aware else None,
+                    include_ocr=args.include_ocr,
+                    ocr_engine=args.ocr_engine,
+                    include_omniparser=args.include_omniparser,
+                    min_area=args.min_area,
+                    omniparser_root=args.omniparser_root,
+                    omniparser_weights_dir=args.omniparser_weights_dir,
+                )
             candidate_cache[image_cache_key] = (copy.deepcopy(candidates), copy.deepcopy(meta))
         else:
             candidate_cache_hits += 1
@@ -169,7 +221,13 @@ def main() -> int:
     summary = {
         "data": args.data,
         "image_root": args.image_root,
+        "generator": args.generator,
         "max_candidates": args.max_candidates,
+        "min_area": args.min_area,
+        "include_ocr": args.include_ocr,
+        "ocr_engine": args.ocr_engine,
+        "include_omniparser": args.include_omniparser,
+        "query_aware": args.query_aware,
         "val_ratio": args.val_ratio,
         "seed": args.seed,
         "group_split_key": args.group_split_key,

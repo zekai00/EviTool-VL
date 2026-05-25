@@ -21,7 +21,7 @@ TRL_ROOT = PROJECT_ROOT / "third_party" / "trl"
 if TRL_ROOT.exists() and str(TRL_ROOT) not in sys.path:
     sys.path.insert(0, str(TRL_ROOT))
 
-from rl.gui_candidate_env import build_candidate_prompt, score_candidate_action
+from rl.gui_candidate_env import build_candidate_prompt, score_candidate_action, score_candidate_action_v2
 
 BASELINE_PATH = PROJECT_ROOT / "eval" / "eval_baseline.py"
 spec = importlib.util.spec_from_file_location("eval_baseline", BASELINE_PATH)
@@ -47,6 +47,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=50)
+    parser.add_argument(
+        "--reward-version",
+        choices=("v1", "v2"),
+        default="v1",
+        help="v2 lowers legal-wrong reward and adds center-distance shaping for stronger GRPO advantages.",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
@@ -107,18 +113,24 @@ def candidate_reward(completions: list[Any], answer_bbox: list[Any], candidates:
     valid_values: list[float] = []
     pointing_values: list[float] = []
     iou50_values: list[float] = []
+    center_values: list[float] = []
+    reward_version = kwargs.get("reward_version", "v1")
+    scorer = score_candidate_action_v2 if reward_version == "v2" else score_candidate_action
     for completion, gt_bbox, cand_list in zip(completions, answer_bbox, candidates, strict=False):
         row = {"answer_bbox": gt_bbox}
-        reward = score_candidate_action(row, cand_list or [], _completion_text(completion))
+        reward = scorer(row, cand_list or [], _completion_text(completion))
         rewards.append(float(reward["total"]))
         valid_values.append(float(reward["valid"]))
         pointing_values.append(float(reward["pointing"]))
         iou50_values.append(float(reward["iou_50"]))
+        center_values.append(float(reward.get("center_shaped", 0.0)))
     log_metric = kwargs.get("log_metric")
     if callable(log_metric) and rewards:
         log_metric("candidate_reward/valid", sum(valid_values) / len(valid_values))
         log_metric("candidate_reward/pointing", sum(pointing_values) / len(pointing_values))
         log_metric("candidate_reward/iou50", sum(iou50_values) / len(iou50_values))
+        if reward_version == "v2":
+            log_metric("candidate_reward/center", sum(center_values) / len(center_values))
     return rewards
 
 
@@ -153,10 +165,11 @@ def main() -> int:
     if args.dry_run:
         rows = load_jsonl(args.train_data, min(4, args.limit or 4))
         checks = []
+        scorer = score_candidate_action_v2 if args.reward_version == "v2" else score_candidate_action
         for row in rows:
             oracle_id = row.get("oracle_candidate_id") or "c00"
             for label, completion in [("top1", '{"candidate_id":"c00"}'), ("oracle", json.dumps({"candidate_id": oracle_id}))]:
-                reward = score_candidate_action({"answer_bbox": row.get("answer_bbox")}, row.get("candidates") or [], completion)
+                reward = scorer({"answer_bbox": row.get("answer_bbox")}, row.get("candidates") or [], completion)
                 checks.append({"id": row.get("id"), "policy": label, "completion": completion, "reward": reward})
         print(
             json.dumps(
@@ -221,7 +234,13 @@ def main() -> int:
     trainer = GRPOTrainer(
         model=model,
         args=config,
-        reward_funcs=candidate_reward,
+        reward_funcs=lambda completions, answer_bbox, candidates, **kwargs: candidate_reward(
+            completions,
+            answer_bbox,
+            candidates,
+            reward_version=args.reward_version,
+            **kwargs,
+        ),
         train_dataset=Dataset.from_list(train_examples),
         eval_dataset=Dataset.from_list(eval_examples) if eval_examples else None,
         processing_class=processor,

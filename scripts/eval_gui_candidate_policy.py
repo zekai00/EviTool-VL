@@ -27,6 +27,7 @@ from rl.gui_candidate_env import (
     parse_candidate_id,
     policy_action,
     score_candidate_action,
+    score_candidate_action_v2,
 )
 
 BASELINE_PATH = PROJECT_ROOT / "eval" / "eval_baseline.py"
@@ -48,6 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-new-tokens", type=int, default=48)
     parser.add_argument("--temperature", type=float, default=0.0)
+    parser.add_argument("--reward-version", choices=["v1", "v2"], default="v1")
     parser.add_argument("--use-overlay", action=argparse.BooleanOptionalAction, default=True)
     return parser.parse_args()
 
@@ -135,6 +137,7 @@ def write_report(path: Path, args: argparse.Namespace, summary: dict[str, Any]) 
         "",
         f"- Data: `{args.data}`",
         f"- Policy: `{args.policy}`",
+        f"- Reward version: `{args.reward_version}`",
         f"- Model: `{args.model if args.policy == 'model' else '-'}`",
         f"- Adapter: `{args.adapter if args.adapter else '-'}`",
         f"- Samples: {summary['count']}",
@@ -194,7 +197,8 @@ def main() -> int:
             else:
                 prediction = policy_action(args.policy, row, candidates, rng)
             latency = time.time() - started
-            reward = score_candidate_action(row, candidates, prediction)
+            scorer = score_candidate_action_v2 if args.reward_version == "v2" else score_candidate_action
+            reward = scorer(row, candidates, prediction)
             candidate_id, parseable = parse_candidate_id(prediction)
             result = {
                 "id": row.get("id"),
@@ -215,7 +219,7 @@ def main() -> int:
             print(f"[{idx}/{len(records)}] {row.get('id')} -> {prediction!r} reward={reward['total']}", flush=True)
 
     summary = summarize(results)
-    summary.update({"policy": args.policy, "model": args.model if args.policy == "model" else None, "adapter": args.adapter})
+    summary.update({"policy": args.policy, "reward_version": args.reward_version, "model": args.model if args.policy == "model" else None, "adapter": args.adapter})
     summary_path = output_path.with_suffix(output_path.suffix + ".summary.json")
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     write_report(Path(args.report), args, summary)

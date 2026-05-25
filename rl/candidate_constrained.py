@@ -98,6 +98,34 @@ def rank_bucket(rank: int | None) -> str:
     return "late"
 
 
+def rank_balanced_indices(rows: list[dict[str, Any]], *, seed: int, epoch: int = 0) -> list[int]:
+    """Return row indices interleaved by oracle-rank bucket.
+
+    The previous candidate policy overused early candidates such as `c00`.  A
+    plain shuffled dataloader can still over-represent one oracle-rank bucket in
+    short runs, so this helper round-robins early/middle/late rows after
+    shuffling each bucket.  It is intentionally deterministic per epoch.
+    """
+    buckets: dict[str, list[int]] = {"early": [], "middle": [], "late": [], "unknown": []}
+    for index, row in enumerate(rows):
+        bucket = str(row.get("oracle_rank_bucket") or rank_bucket(row.get("oracle_rank")))
+        if bucket not in buckets:
+            bucket = "unknown"
+        buckets[bucket].append(index)
+
+    rng = random.Random(f"rank-balanced:{seed}:{epoch}")
+    for indices in buckets.values():
+        rng.shuffle(indices)
+
+    order: list[int] = []
+    active = ["early", "middle", "late", "unknown"]
+    while any(buckets[name] for name in active):
+        for name in active:
+            if buckets[name]:
+                order.append(buckets[name].pop())
+    return order
+
+
 def _candidate_by_id(candidates: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {str(candidate["candidate_id"]): candidate for candidate in candidates}
 

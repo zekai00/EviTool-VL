@@ -35,6 +35,7 @@ from rl.candidate_constrained import (
     build_cc_prompt,
     candidate_reward_table,
     compute_candidate_completion_logprobs,
+    rank_balanced_indices,
 )
 
 try:
@@ -61,6 +62,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--policy-temperature", type=float, default=1.2)
     parser.add_argument("--clip-eps", type=float, default=0.2)
     parser.add_argument("--entropy-coef", type=float, default=0.01)
+    parser.add_argument("--kl-coef", type=float, default=0.0, help="KL penalty against precomputed reference logprobs.")
+    parser.add_argument("--reference-logprobs-key", default="reference_logprobs")
+    parser.add_argument(
+        "--rank-balanced-sampler",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Interleave early/middle/late oracle-rank rows before DDP sharding.",
+    )
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--logging-steps", type=int, default=1)
     parser.add_argument("--save-metrics", default=None)
@@ -253,6 +262,8 @@ def train_one_batch(
         "oracle_sample_rate": 0.0,
         "top1_bias_rate": 0.0,
         "best_action_reward": 0.0,
+        "kl_ref": 0.0,
+        "kl_ref_rows": 0.0,
         "valid_rows": 0.0,
     }
 
@@ -272,6 +283,15 @@ def train_one_batch(
         logits = log_scores / max(args.policy_temperature, 1e-6)
         logpi = F.log_softmax(logits, dim=0)
         probs = logpi.exp()
+        kl_ref = torch.zeros((), device=device)
+        ref_lookup = row.get(args.reference_logprobs_key) or {}
+        if args.kl_coef > 0 and all(candidate_id in ref_lookup for candidate_id in action_ids):
+            ref_scores = torch.tensor([float(ref_lookup[candidate_id]) for candidate_id in action_ids], device=device)
+            ref_logpi = F.log_softmax(ref_scores / max(args.policy_temperature, 1e-6), dim=0)
+            # Forward KL under the current policy.  The reference distribution is
+            # precomputed offline so training does not need a second frozen VLM
+            # replica on each 3090.
+            kl_ref = (probs * (logpi - ref_logpi)).sum()
 
         # Sampling is detached: the gradient comes from the selected log-probs,
         # while actions are drawn from the current candidate-constrained policy.
@@ -296,7 +316,7 @@ def train_one_batch(
         clipped = torch.clamp(ratio, 1.0 - args.clip_eps, 1.0 + args.clip_eps) * advantages
         policy_loss = -torch.minimum(unclipped, clipped).mean()
         entropy = -(probs * logpi).sum()
-        losses.append(policy_loss - args.entropy_coef * entropy)
+        losses.append(policy_loss + args.kl_coef * kl_ref - args.entropy_coef * entropy)
 
         oracle_id = str(row.get("oracle_candidate_id") or "")
         rank1_id = None
@@ -311,6 +331,8 @@ def train_one_batch(
         metric_sums["oracle_sample_rate"] += sum(float(candidate_id == oracle_id) for candidate_id in sampled_ids) / len(sampled_ids)
         metric_sums["top1_bias_rate"] += sum(float(candidate_id == rank1_id) for candidate_id in sampled_ids) / len(sampled_ids)
         metric_sums["best_action_reward"] += max(float(reward_lookup[candidate_id]) for candidate_id in action_ids)
+        metric_sums["kl_ref"] += float(kl_ref.detach().item())
+        metric_sums["kl_ref_rows"] += float(args.kl_coef > 0 and all(candidate_id in ref_lookup for candidate_id in action_ids))
         metric_sums["valid_rows"] += 1.0
 
     if not losses:
@@ -359,25 +381,38 @@ def main() -> int:
         )
 
     optimizer = torch.optim.AdamW((param for param in model.parameters() if param.requires_grad), lr=args.learning_rate)
-    dataset = CandidateRows(rows)
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=args.seed) if distributed else None
-    loader = DataLoader(
-        dataset,
-        batch_size=args.per_device_batch_size,
-        sampler=sampler,
-        shuffle=sampler is None,
-        collate_fn=collate_rows,
-        num_workers=0,
-        drop_last=False,
-    )
-
     metrics_history: list[dict[str, Any]] = []
     global_step = 0
     epoch = 0
     model.train()
     while global_step < args.max_steps:
-        if sampler is not None:
-            sampler.set_epoch(epoch)
+        if args.rank_balanced_sampler:
+            order = rank_balanced_indices(rows, seed=args.seed, epoch=epoch)
+            epoch_rows = [rows[index] for index in order]
+            if distributed:
+                epoch_rows = epoch_rows[rank::world_size]
+            loader = DataLoader(
+                CandidateRows(epoch_rows),
+                batch_size=args.per_device_batch_size,
+                shuffle=False,
+                collate_fn=collate_rows,
+                num_workers=0,
+                drop_last=False,
+            )
+        else:
+            dataset = CandidateRows(rows)
+            sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, seed=args.seed) if distributed else None
+            if sampler is not None:
+                sampler.set_epoch(epoch)
+            loader = DataLoader(
+                dataset,
+                batch_size=args.per_device_batch_size,
+                sampler=sampler,
+                shuffle=sampler is None,
+                collate_fn=collate_rows,
+                num_workers=0,
+                drop_last=False,
+            )
         for batch_rows in loader:
             if global_step >= args.max_steps:
                 break
@@ -429,6 +464,9 @@ def main() -> int:
             "image_max_pixels": args.image_max_pixels,
             "policy_temperature": args.policy_temperature,
             "entropy_coef": args.entropy_coef,
+            "kl_coef": args.kl_coef,
+            "reference_logprobs_key": args.reference_logprobs_key,
+            "rank_balanced_sampler": args.rank_balanced_sampler,
             "gradient_checkpointing": args.gradient_checkpointing,
             "ddp_find_unused_parameters": args.ddp_find_unused_parameters,
             "metrics_tail": metrics_history[-5:],

@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from . import click, crop, detect, measure, ocr, visualize, zoom
+from . import click, crop, detect, measure, ocr, select_candidate, visualize, zoom
 from . import inspect_image
 from .schema import make_evidence_id, parse_action, run_with_timing
 
@@ -22,6 +22,7 @@ TOOL_IMPLS = {
     "mark": visualize.run,
     "visualize": visualize.run,
     "click": click.run,
+    "select_candidate": select_candidate.run,
 }
 
 

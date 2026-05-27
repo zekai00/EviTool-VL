@@ -21,6 +21,7 @@ SUPPORTED_TOOLS = {
     "mark",
     "visualize",
     "click",
+    "select_candidate",
 }
 
 

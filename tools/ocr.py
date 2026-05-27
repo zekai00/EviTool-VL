@@ -13,6 +13,9 @@ import numpy as np
 from .common import crop_pil, image_size, load_image, pil_to_cv, sort_boxes_reading_order
 
 
+_EASYOCR_READERS: dict[tuple[tuple[str, ...], bool, str], Any] = {}
+
+
 def _candidate_text_regions(image_bgr: np.ndarray, offset: tuple[int, int] = (0, 0), max_regions: int = 80) -> list[dict[str, Any]]:
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     # Text-like regions tend to have high local contrast and horizontal strokes.
@@ -65,7 +68,12 @@ def _run_easyocr(image_bgr: np.ndarray, offset: tuple[int, int], languages: list
 
     model_dir = os.environ.get("EASYOCR_MODULE_PATH", "/root/models/easyocr")
     Path(model_dir).mkdir(parents=True, exist_ok=True)
-    reader = easyocr.Reader(languages, gpu=torch.cuda.is_available(), model_storage_directory=model_dir)
+    gpu = torch.cuda.is_available()
+    key = (tuple(languages), gpu, str(Path(model_dir).resolve()))
+    reader = _EASYOCR_READERS.get(key)
+    if reader is None:
+        reader = easyocr.Reader(languages, gpu=gpu, model_storage_directory=model_dir)
+        _EASYOCR_READERS[key] = reader
     result = reader.readtext(image_bgr)
     ox, oy = offset
     spans = []

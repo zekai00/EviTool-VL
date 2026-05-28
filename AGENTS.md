@@ -191,7 +191,8 @@ python3 scripts/train_gui_candidate_cc_grpo.py \
 - 213tg replay adapter 总体优于 100tg adapter，但 table 明显退化：v3 SFT table=0.88，100tg table=0.84，213tg table=0.76；advanced 仍为 0.6667，低于 v3 SFT 0.7778。因此它只能作为下一轮 RL candidate/current model，不能跑通用最终验收，不要跑或宣称 `test200` 结果。
 - 截至 2026-05-28 22:46 CST，`scripts/train_browser_rl_onpolicy_grpo.py` 的 collect-only 工程问题已修：默认 `--stream-collect` 会边采边写 `groups.jsonl.tmp`、`rollouts.jsonl.tmp` 和 `live_summary.json`；`--resume-collect` 会读取临时文件、跳过已覆盖 task，且目标已满足时不加载本地 Qwen 直接退出。验证目录：`outputs/onpolicy_collect_stream_smoke_20260528_check`。
 - 截至 2026-05-29 00:33 CST，正式可复用 BrowserRL 数据已归档到 `/root/datasets/browser_rl/`：`task_suites/` 放固定任务套件，`sft/` 放 LLaMA-Factory 可读 SFT 数据，`onpolicy/` 放可复用 on-policy group 数据。后续新数据优先写入这个目录，仓库内 `outputs/` 只作为临时中间产物。
-- 下一步专门采 table_action 与 advanced_scroll/dialog，并用 table/advanced replay 或更高权重把 table 拉回 >=0.84、advanced 拉回 >=0.7778。
+- 截至 2026-05-29 02:16 CST，table/advanced repair 版 289 trainable groups 已完成：adapter=`outputs/onpolicy_browser_rl_grpo_table_advanced_repair_289tg_safe_20260529_0101/adapter`，val_balanced_70=0.9420，val200=0.9100，test200=0.8900。它是当前阶段最强 adapter，可以作为下一轮 current model。
+- 本轮 test200 已首次用于阶段性最终验收，后续不要继续用 test200 频繁调参。主要剩余问题是 advanced_scroll：val advanced_scroll=0.6667，但 test advanced_scroll=0.0000；下一轮应改 scroll action sampling 或构建 scroll recovery 数据，不要只盲采。
 - 静态截图数据不能替代 on-policy RL 环境；没有 `reset/step/verifier` 的数据只应用于 SFT warmup 或辅助 loss。
 
 ## 提交与 PR 指南

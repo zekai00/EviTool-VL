@@ -2,6 +2,20 @@
 
 更新日期：2026-05-29
 
+## 2026-05-29 02:16 CST 更新：289 trainable groups table/advanced repair 完成，test200 达到 0.89
+
+- 报告：`/root/Workspace/VLM/项目文档/03_实验与训练报告/VerifierGuided-OnPolicy-GRPO-TableAdvancedRepair-289TrainableGroups训练评测报告_20260529_0216.md`
+- 仓库副本：`/root/Workspace/VLM/EviTool-VL/docs/项目文档/03_实验与训练报告/VerifierGuided-OnPolicy-GRPO-TableAdvancedRepair-289TrainableGroups训练评测报告_20260529_0216.md`
+- 当前最强 adapter：`outputs/onpolicy_browser_rl_grpo_table_advanced_repair_289tg_safe_20260529_0101/adapter`
+- 新采集数据：`/root/datasets/browser_rl/onpolicy/onpolicy_browser_rl_table_advanced_collect_20260529_0040` 与 `/root/datasets/browser_rl/onpolicy/onpolicy_browser_rl_advanced_collect_20260529_0050`，共 64 groups、38 trainable groups、44 rollouts。
+- 合并训练集：`/root/datasets/browser_rl/onpolicy/onpolicy_browser_rl_table_advanced_replay_289tg_merged_20260529_0100`，213 old groups + 38 new groups * 2 = 289 trainable groups。
+- 训练：从 213tg replay adapter 继续，lr=2e-7，1 epoch，37 optimizer steps，replay_loss_weight=0.06，replay_ratio=0.30。
+- val_balanced_70：success_rate=0.9420。
+- val200：success_rate=0.9100，table=0.8800，advanced=0.8889，valid_json/action=1.0。
+- test200：首次用于阶段验收，success_rate=0.8900，table=0.8400，advanced=0.6667，advanced_scroll=0.0000。
+- 质量校验：new collect 44/44 valid；val200 200/200 valid；test200 200/200 valid；error_count 均为 0。
+- 结论：本轮 adapter 可作为下一轮 current model；后续不再用 test200 调参，重点改 advanced_scroll 的 action sampling 或 recovery 数据。
+
 ## 2026-05-29 00:33 CST 更新：整理提交前状态并迁移 BrowserRL 正式数据目录
 
 - 报告：`/root/Workspace/VLM/项目文档/03_实验与训练报告/代码提交与BrowserRL数据目录迁移报告_20260529_0033.md`

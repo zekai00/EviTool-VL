@@ -123,9 +123,9 @@ y_px = round(y_norm / 1000 * viewport_height)
 
 推荐第一阶段：
 
-1. 先用本地 Playwright 自建 50-100 个任务模板跑通训练闭环。
-2. 再接 BrowserGym/MiniWoB++ 做外部可执行任务。
-3. 最后用 WebArena/VisualWebArena/OSWorld 做泛化评测，而不是一开始就拿它们训练。
+1. 先接入 CUA-Gym、BrowserGym/MiniWoB++、WebArena-Infinity 这类已有可执行环境或轨迹资源，验证它们能否落到本项目的 direct-action rollout schema。
+2. 同时做少量本地 Playwright smoke tasks，用来控制变量、调试 action parser、screenshot recorder、verifier 和 reward，不再先手写大规模任务集。
+3. 最后用 WebArena/VisualWebArena/OSWorld 做泛化评测，而不是一开始就拿重环境训练。
 
 参考：
 
@@ -153,15 +153,17 @@ y_px = round(y_norm / 1000 * viewport_height)
 
 不是“必须从零手写 300-500 个”，但必须拥有一批可 reset、可 verifier、可批量 rollout 的任务。
 
-推荐做法是混合三类任务：
+推荐做法是混合四类任务：
 
 | 来源 | 第一阶段数量 | 作用 |
 |---|---:|---|
-| 自建 Playwright 任务模板 | 100-200 | 完全可控，能设计 reward 和难度课程 |
-| MiniWoB++ / BrowserGym 任务 | 100-200 | 快速获得现成可执行任务，减少自造偏差 |
+| CUA-Gym 任务 | 先验证 3-5 个，随后扩展 | 最接近 RLVR / verifiable reward 的 computer-use 任务池 |
+| MiniWoB++ / BrowserGym 任务 | 先验证 5-10 个，随后扩展 | 快速获得现成可执行 browser RL 任务，减少自造偏差 |
+| WebArena-Infinity 轨迹/环境 | 先转 100-500 条 SFT，再验证 1 个 app | 提供成功轨迹和自动生成可验证 web app 的参考 |
+| 自建 Playwright smoke tasks | 20 个 | 完全可控，用于调试 action schema、recorder、verifier 和 reward |
 | 现有 OS-Atlas/v2 转换的 direct-click demo | 500-1000 demo | 只用于 SFT warmup，不作为 RL task |
 
-自建任务的优势不是“数据量”，而是 verifier 质量。真正 RL 最怕 reward 不可信。宁可先做 100 个 verifier 很强的任务，也不要做 1000 个无法可靠判定成功的任务。
+自建任务的优势不是“数据量”，而是 verifier 质量和调试可控性。真正 RL 最怕 reward 不可信。宁可先做 20 个 verifier 很强的 smoke tasks，把接口和记录格式跑通，再从 CUA-Gym/BrowserGym/WebArena-Infinity 扩展。
 
 ## 4. Task Dataset 应该长什么样
 
@@ -635,19 +637,19 @@ evaluate held-out tasks
 
 第一周目标：
 
-1. 新增 `envs/browser_rl/` 基础接口。
-2. 实现 Playwright env 的 `reset/step/screenshot/verifier`。
-3. 做 20 个 smoke tasks。
-4. 实现 scripted oracle，自动生成 demo。
-5. 用 Qwen2.5-VL-3B-Instruct 跑 action JSON SFT smoke。
+1. 新增 `envs/browser_rl/` 统一接口，覆盖 `reset/step/screenshot/verifier/recorder`，并采用 direct GUI action JSON。
+2. 先接 MiniWoB++ 或 BrowserGym，跑通 5-10 个最小 browser RL 任务，确认外部 Gym 任务能映射到本项目 rollout schema。
+3. 下载并检查 `xlangai/CUA-Gym`，在隔离目录中验证 3-5 个 task bundle，确认 `task.json`、setup 配置和 `reward.py` 的执行入口、依赖和安全约束。
+4. 接 WebArena-Infinity：先把 Hugging Face trajectories 转成 SFT/warmup 样本，再尝试本地启动 1 个 app 或记录无法启动的依赖阻塞。
+5. 做 20 个自建 Playwright smoke tasks，只用于控制变量和调试 action parser、screenshot、verifier、recorder，不再先手写大规模任务集。
 
 第二周目标：
 
-1. 扩到 100-200 个任务。
-2. 接入 on-policy rollout recorder。
+1. 基于第一周验证结果选择主训练任务源，优先级为 CUA-Gym > BrowserGym/MiniWoB++ > WebArena-Infinity > 自建 smoke tasks。
+2. 扩展可执行任务到 100-200 个，并统一 action/observation/reward schema。
 3. 实现 Verifier-Guided GRPO 最小版本。
-4. 跑 `K=4`、max_steps=4 的小规模 RL。
-5. 输出 held-out success rate 报告。
+4. 跑 `K=4`、max_steps=4 的小规模 on-policy RL。
+5. 输出 held-out success rate、valid action rate、reward hacking 检查报告。
 
 第三周目标：
 

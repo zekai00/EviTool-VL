@@ -1,0 +1,45 @@
+### model
+model_name_or_path: /root/models/Qwen2.5-VL-3B-Instruct
+image_max_pixels: 262144
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+quantization_bit: 4
+lora_rank: 8
+lora_alpha: 16
+lora_dropout: 0.05
+lora_target: all
+freeze_vision_tower: true
+
+### dataset
+dataset_dir: /root/datasets/browser_rl/sft/local_qwen_action_sft_warmup_20260527_2224
+dataset: local_qwen_action_sft_train
+template: qwen2_vl
+cutoff_len: 2048
+max_samples: 4
+preprocessing_num_workers: 1
+dataloader_num_workers: 1
+
+### output
+output_dir: checkpoints/qwen25vl_3b_local_action_sft_warmup_smoke
+logging_steps: 1
+save_steps: 1
+plot_loss: false
+overwrite_output_dir: true
+save_only_model: true
+report_to: none
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 1
+learning_rate: 5.0e-5
+max_steps: 1
+lr_scheduler_type: cosine
+warmup_ratio: 0.0
+bf16: true
+gradient_checkpointing: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null

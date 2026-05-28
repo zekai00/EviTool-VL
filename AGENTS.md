@@ -3,6 +3,20 @@
 ## 默认工作偏好
 
 - 默认用中文回答。
+- 凡是写给用户看的回复、项目文档、阶段报告、路线规划和实验说明，英文术语或缩写第一次出现必须先用中文解释，再继续使用。不要假设用户已经知道这些英文词在本项目里的具体含义。例如：
+  - `Adapter`：适配器，把外部环境的输入输出格式翻译成我们项目内部格式。
+  - `Rollout`：一次完整尝试轨迹，从任务开始、执行多步动作，到成功、失败或超时结束。
+  - `Schema`：数据格式规范，说明一条记录有哪些字段、字段叫什么、值是什么类型。
+  - `Policy`：策略，也就是决定下一步动作的主体，可以是脚本、随机规则或 Qwen 模型。
+  - `Verifier`：验证器，用程序检查任务是否完成，并返回 reward。
+  - `Reward`：奖励分数，用来告诉 RL 这一步或这条轨迹做得好不好。
+  - `On-policy RL`：在线策略强化学习，用当前模型自己产生的新轨迹训练当前模型。
+  - `Teacher policy`：教师策略，用更强或远程模型生成示范或做基线评测；它不是要被 RL 更新的当前模型。
+  - `Current model`：当前模型，指本轮训练真正会更新参数的本地 Qwen2.5-VL/Qwen3-VL checkpoint。
+- 面向用户说明时不要过度省略。尤其是涉及 BrowserGym、MiniWoB++、CUA-Gym、Playwright、GRPO、SFT、rollout、reward、verifier、sandbox 等内容时，要解释“它是什么、为什么要做、输入是什么、输出是什么、当前做到哪一步、还没做到什么”。
+- 如果同一段里有多个英文名词，要逐个解释；如果一个名词在不同上下文里含义会变，比如 `policy` 既可能指随机脚本也可能指 Qwen 模型，要明确当前说的是哪一种。
+- 报告实验状态时要区分“环境已经可执行”“脚本已经接入”“模型已经训练”“模型已经学会任务”这几个层级，不要用过短的结论跳过中间状态。
+- 如果某个步骤只是验证可接入，而不是完成训练或证明模型能力，必须明确说清楚，避免把环境验证误说成模型已经学会任务。
 - 修改代码前先说明计划；开始任务时先看 `git status --short`，避免覆盖用户改动。
 - 开始较长任务前阅读 `docs/codex-worklog.md`，了解最近实验状态；如果文件不存在则继续执行，不要阻塞。
 - 重要阶段完成后更新 `docs/codex-worklog.md`，记录完成内容、改动文件、实验命令、未解决问题和下一步计划。
@@ -15,6 +29,8 @@
 
 - 工作区根目录通常是 `/root/Workspace/VLM`，仓库根目录是 `/root/Workspace/VLM/EviTool-VL`。
 - 当前主线已经切换为真正的 on-policy VLM agentic RL：训练 Qwen2.5-VL / Qwen3-VL 在可执行 GUI 环境中看截图、输出 direct GUI action、执行动作、接收新截图和 verifier reward，并通过在线 rollout 做 RL。
+- DashScope 上的 `qwen3.6-flash`、`qwen3.7-max` 等远程模型只能作为 teacher/baseline policy，用于验证环境、生成少量 warmup 轨迹或做对照。它们不是本项目要训练的 current model，不能把它们的 rollout 误称为本地 Qwen2.5-VL/Qwen3-VL 的 on-policy RL。
+- 真正的 current model 必须是本地可训练 checkpoint，例如 `/root/models/Qwen2.5-VL-3B-Instruct`、本地 Qwen3-VL 或其 LoRA/SFT/RL checkpoint。只有这个模型自己 rollout 后再被 verifier reward 更新，才算严格 on-policy RL。
 - 主动作空间应优先使用 direct action，而不是候选框选择：
   - `click(x, y)`
   - `double_click(x, y)`
@@ -33,7 +49,7 @@
   - 可选工具/teacher，不作为默认 action space
 - 新增 GUI-RL 环境时，优先从本地 browser Playwright Gym 做起，再接 BrowserGym/MiniWoB++，不要一开始直接上 OSWorld/真实桌面重环境。
 - 真正 on-policy RL 数据应来自当前模型在线 rollout，而不是静态截图候选框数据。每条 RL 任务必须尽量具备 `reset`、`step`、`screenshot`、`verifier` 和 `reward`。
-- 大型数据、模型权重、训练输出和评测输出应放在 `outputs/`、`checkpoints/` 或 `/root/models`，不要提交到 Git。
+- 正式可复用 BrowserRL 数据集统一放在 `/root/datasets/browser_rl/`；`outputs/` 只放临时实验输出，`checkpoints/` 放训练 checkpoint，`/root/models` 放底模权重。不要把大型数据、模型权重、训练输出或评测 raw output 提交到 Git。
 
 ## 项目结构与模块组织
 
@@ -150,8 +166,32 @@ python3 scripts/train_gui_candidate_cc_grpo.py \
 ## 当前实验注意事项
 
 - 当前推荐的 warmup 数据是 strict v2 direct/tool trajectory，可从 `/root/models/datasets/gui_tool_trajectory_v2_os_atlas_linux_1k_unique_strict_20260527_1933` 转换或使用。
+- 当前已经有 `local_qwen` 本地策略接入口：它能加载本地 Qwen2.5-VL/Qwen3-VL base checkpoint 和 LoRA adapter，并在 browser rollout 中输出 direct GUI action JSON。
+- 截至 2026-05-27 23:02 CST，`local_qwen` 接口已跑通，但本地 Qwen2.5-VL LoRA 在 smoke_form_01 上 success_rate 仍为 0.0；这代表模型尚未学会任务，不应误写成已经完成 on-policy RL。
+- 截至 2026-05-27 23:56 CST，`history-aware trajectory SFT` v1 已实现并训练，本地 Qwen2.5-VL 在 20 个 local smoke tasks 上 success_rate=0.3、valid_action_rate=1.0。
+- `history-aware` 指提示词里包含 step、历史动作、上一轮 verifier progress、动作空间和坐标规则，用来让模型学习多步状态判断。
+- 截至 2026-05-28 00:38 CST，300 条 local browser tasks 已构建并通过 scripted oracle 校验，oracle success_rate=1.0；history-aware SFT v2 已训练，本地 Qwen2.5-VL 在独立 30 个 test tasks 上 success_rate=0.333、valid_action_rate=1.0。
+- 当前 300 任务 v2 结果说明模型已经学会合法 JSON action 格式，但还没有稳定学会精确坐标 grounding。失败主要集中在 form/search/menu/table 的点击高度和结果定位。
+- 截至 2026-05-28 03:45 CST，1000 条 local browser tasks 已构建，加入坐标扰动增强和失败恢复示范后训练 history-aware SFT v3。本地 Qwen2.5-VL-3B LoRA 在独立 test100 上 success_rate=0.82、valid_json_rate=1.0、valid_action_rate=1.0、policy_error_rate=0.0。
+- 这次 0.82 是 SFT warmup 后的可执行环境评测，不是严格 on-policy RL；它说明 current model 已达到进入小规模 verifier-guided RL 的门槛。
+- 当前剩余弱项主要是 form 和 choice：form success_rate=0.6364，choice success_rate=0.6667；table/todo 已达到 1.0，search/menu 已超过 0.82。
+- Qwen2.5-VL-7B-Instruct 已下载到 `/root/models/Qwen2.5-VL-7B-Instruct`，截至 2026-05-28 04:34 CST 已完成 5/5 个 safetensors 分片，目录大小 17G；`transformers.AutoConfig` 本地读取验证通过，`model_type=qwen2_5_vl`。
+- 截至 2026-05-28 12:19 CST，form/choice 定向 SFT repair v1 已完成但不采用：`qwen25vl_3b_history_aware_sft_v3_form_choice_repair_v1_lora` 在 test100 上 best/root success_rate=0.76，低于 v3 baseline 0.82。它把 choice 从 0.6667 提到 0.8889，但 search 从 0.8636 掉到 0.5909，table 从 1.0 掉到 0.8824，说明发生了能力干扰。
+- 后续不要默认使用 repair v1 adapter 作为 current model；current model 仍应优先使用 `checkpoints/qwen25vl_3b_history_aware_sft_v3_1000_aug_lora`。repair 数据只作为分析材料，除非重新做更保守的 loss weight/replay/early-stop 方案。
+- 截至 2026-05-28 13:26 CST，`scripts/train_browser_rl_onpolicy_grpo.py` 已跑通 verifier-guided on-policy Browser RL 小规模闭环：当前模型采样动作，Playwright reset/replay 分支执行，verifier reward 组内归一化后更新 LoRA。激进版 test30 success_rate=0.5667，安全版 test30 success_rate=0.70，等于 v3 baseline first30=0.70。
+- 本轮 on-policy adapter 只证明工程链路可用，不代表性能超过 v3 baseline；默认 current model 仍不要切到 `outputs/onpolicy_browser_rl_grpo_smoke_v1_safe_20260528_1318/adapter`，除非后续扩大训练并通过 test100/test set evaluation gate。
+- 截至 2026-05-28 14:38 CST，新的 BrowserRL 2000 task suite 已建立并迁移到正式数据目录：`/root/datasets/browser_rl/task_suites/browser_rl_task_suite_2000_20260528_1344`，train/val/test=1600/200/200。旧中间目录 `outputs/browser_rl_task_suite_2000_20260528_1338` 的切分不采用，因为 choice/advanced 子模板覆盖有偏。
+- 当前正式 validation gate 是 v3 baseline 在新 val200 上的 `success_rate=0.745`，路径：`outputs/rollouts_local_qwen25vl_history_aware_v3_2000_val200_20260528_1412/merged/family_metrics.json`。后续 RL adapter 必须至少超过这个 val200 baseline，且主 family 不应明显退化。
+- `test200` 暂时保留作最终验收，不要频繁用于调参或选择 adapter。快速 gate 可用 `/root/datasets/browser_rl/task_suites/browser_rl_task_suite_2000_20260528_1344/val_balanced_70_tasks.jsonl`，但最终接受 adapter 仍看 val200。
 - 候选框补框、full-candidate score cache、candidate-only GRPO 都不是当前第一优先级。
-- 下一阶段优先实现本地 Playwright GUI-RL Gym、可 verifier 任务集、scripted oracle demo、on-policy rollout recorder 和 Verifier-Guided GRPO。
+- 截至 2026-05-28 17:30 CST，100 trainable groups 的安全版 verifier-guided on-policy GRPO 已通过 val200 gate：adapter=`outputs/onpolicy_browser_rl_grpo_100tg_safe_20260528_1646/adapter`，val200 success_rate=0.790，高于 v3 baseline 0.745；validation=`outputs/onpolicy_browser_rl_grpo_100tg_safe_validation_20260528_1729`，444/444 valid，error_count=0。
+- 后续 on-policy RL 的 current model 可以切到 `outputs/onpolicy_browser_rl_grpo_100tg_safe_20260528_1646/adapter`；但它还没有经过 `test200` 最终验收，不要把它写成最终模型。
+- 下一阶段应扩大到 200-300 trainable groups，并加入 v3 replay 或 KL 稳定项。重点补 advanced_scroll/dialog、choice_checkbox、table_action，避免 advanced 和 table 在 val200 上继续退化。
+- 截至 2026-05-28 21:32 CST，213 trainable groups 的 replay 版 GRPO 已完成：adapter=`outputs/onpolicy_browser_rl_grpo_replay_213tg_safe_20260528_2041/adapter`，val_balanced_70=0.8406，val200=0.850，validation=`outputs/onpolicy_browser_rl_grpo_replay_213tg_safe_validation_20260528_2132`，606/606 valid。
+- 213tg replay adapter 总体优于 100tg adapter，但 table 明显退化：v3 SFT table=0.88，100tg table=0.84，213tg table=0.76；advanced 仍为 0.6667，低于 v3 SFT 0.7778。因此它只能作为下一轮 RL candidate/current model，不能跑通用最终验收，不要跑或宣称 `test200` 结果。
+- 截至 2026-05-28 22:46 CST，`scripts/train_browser_rl_onpolicy_grpo.py` 的 collect-only 工程问题已修：默认 `--stream-collect` 会边采边写 `groups.jsonl.tmp`、`rollouts.jsonl.tmp` 和 `live_summary.json`；`--resume-collect` 会读取临时文件、跳过已覆盖 task，且目标已满足时不加载本地 Qwen 直接退出。验证目录：`outputs/onpolicy_collect_stream_smoke_20260528_check`。
+- 截至 2026-05-29 00:33 CST，正式可复用 BrowserRL 数据已归档到 `/root/datasets/browser_rl/`：`task_suites/` 放固定任务套件，`sft/` 放 LLaMA-Factory 可读 SFT 数据，`onpolicy/` 放可复用 on-policy group 数据。后续新数据优先写入这个目录，仓库内 `outputs/` 只作为临时中间产物。
+- 下一步专门采 table_action 与 advanced_scroll/dialog，并用 table/advanced replay 或更高权重把 table 拉回 >=0.84、advanced 拉回 >=0.7778。
 - 静态截图数据不能替代 on-policy RL 环境；没有 `reset/step/verifier` 的数据只应用于 SFT warmup 或辅助 loss。
 
 ## 提交与 PR 指南

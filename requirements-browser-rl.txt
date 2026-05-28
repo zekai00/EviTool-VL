@@ -1,0 +1,8 @@
+# Optional dependencies for executable browser GUI-RL smoke tests.
+playwright
+browsergym-miniwob
+gymnasium
+datasets
+huggingface_hub
+requests
+zstandard

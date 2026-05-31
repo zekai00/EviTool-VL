@@ -34,6 +34,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from envs.browser_rl import LocalQwenPolicy, PlaywrightBrowserEnv, load_tasks
+from envs.browser_rl.actions import pixels_to_normalized
 from envs.browser_rl.qwen_policy import build_prompt
 
 
@@ -50,6 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shuffle-tasks", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-groups", type=int, default=24)
     parser.add_argument("--target-trainable-groups", type=int, default=None)
+    parser.add_argument("--train-max-groups", type=int, default=0, help="Optional cap for trainable groups when training from an existing groups.jsonl.")
     parser.add_argument(
         "--family-quotas-json",
         default=None,
@@ -66,6 +68,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-generations", type=int, default=3)
     parser.add_argument("--dedupe-actions", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--max-sample-attempts", type=int, default=8)
+    parser.add_argument(
+        "--continue-on-single-sample",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Continue the rollout when a state yields only one unique VLM action; no GRPO group is created for that state.",
+    )
+    parser.add_argument(
+        "--inject-scroll-candidates",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Explicitly add rule-based scroll candidates for advanced_scroll exploration. Off by default to keep collection VLM-sampled.",
+    )
+    parser.add_argument(
+        "--inject-target-click-candidates",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Explicitly add DOM-center target click candidates after target_visible. Off by default to avoid leaking verifier/DOM priors.",
+    )
+    parser.add_argument(
+        "--scroll-candidate-dys",
+        default="600,900,1200",
+        help="Comma-separated dy values injected as verifier-guided exploration candidates for advanced_scroll.",
+    )
     parser.add_argument("--sampling-temperature", type=float, default=0.8)
     parser.add_argument("--max-new-tokens", type=int, default=96)
     parser.add_argument("--max-history", type=int, default=4)
@@ -78,9 +103,48 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--exec-error-penalty", type=float, default=0.2)
     parser.add_argument("--success-bonus", type=float, default=0.0)
     parser.add_argument("--step-cost", type=float, default=0.0)
+    parser.add_argument(
+        "--target-distance-reward-weight",
+        type=float,
+        default=0.0,
+        help="Extra reward for click proximity to visible #target. Default 0 keeps previous reward behavior.",
+    )
+    parser.add_argument(
+        "--target-distance-reward-sigma",
+        type=float,
+        default=80.0,
+        help="Gaussian sigma in 0-1000 normalized coordinate units for target distance reward.",
+    )
+    parser.add_argument(
+        "--target-distance-reward-templates",
+        default="advanced_scroll",
+        help="Comma-separated task templates that may receive target distance reward.",
+    )
+    parser.add_argument(
+        "--repeat-click-penalty",
+        type=float,
+        default=0.0,
+        help="Penalty when a click repeats a previous click within repeat-click-radius. Default 0 disables it.",
+    )
+    parser.add_argument(
+        "--repeat-click-radius",
+        type=float,
+        default=25.0,
+        help="Normalized coordinate radius used by repeat-click-penalty.",
+    )
     parser.add_argument("--min-reward-std", type=float, default=1e-6)
     parser.add_argument("--learning-rate", type=float, default=5e-6)
     parser.add_argument("--logprob-reduction", choices=["mean", "sum"], default="mean")
+    parser.add_argument("--grpo-loss-type", choices=["vanilla", "clipped"], default="vanilla")
+    parser.add_argument("--clip-epsilon", type=float, default=0.2)
+    parser.add_argument("--kl-beta", type=float, default=0.0)
+    parser.add_argument("--old-logprob-key", default="old_logprob")
+    parser.add_argument("--reference-logprob-key", default="reference_logprob")
+    parser.add_argument(
+        "--skip-logprob-cache",
+        action="store_true",
+        help="Do not precompute old/reference logprobs. Only valid for vanilla loss or pre-cached groups.",
+    )
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
     parser.add_argument("--grad-clip", type=float, default=1.0)
@@ -287,23 +351,39 @@ def collect_onpolicy_groups(
                         args=args,
                     )
                     samples.append(branch)
-                if len(samples) < 2:
+                for injected_index, action in enumerate(injected_candidate_actions(env, task, obs, seen_actions, args)):
+                    branch = evaluate_branch(
+                        env,
+                        task,
+                        prefix,
+                        action,
+                        policy_info=injected_policy_info(action, source="scroll_candidate"),
+                        screenshot_prefix=f"branch_{task.task_id}_{step_index}_{group_index}_inject{injected_index}",
+                        args=args,
+                    )
+                    samples.append(branch)
+                if not samples:
+                    final_info = {"error": "not_enough_unique_samples", "sample_count": len(samples), "attempts": attempts}
+                    break
+                if len(samples) < 2 and not args.continue_on_single_sample:
                     final_info = {"error": "not_enough_unique_samples", "sample_count": len(samples), "attempts": attempts}
                     break
 
                 committed_index = choose_commit_index(samples, args.commit_strategy)
-                group = build_group(task, obs, samples, group_index=group_index, prefix_actions=prefix, committed_index=committed_index, args=args)
-                groups.append(group)
-                stream.append_group(group)
-                if group.get("trainable"):
-                    trainable_by_family[str(group.get("family") or "unknown")] += 1
-                    trainable_by_template[str(group.get("template") or "unknown")] += 1
-                stream.maybe_write_summary(
-                    groups,
-                    rollouts,
-                    extra=live_collect_extra(args, resumed_groups, resumed_rollouts, completed=False),
-                    every=args.stream_flush_every,
-                )
+                group: dict[str, Any] | None = None
+                if len(samples) >= 2:
+                    group = build_group(task, obs, samples, group_index=group_index, prefix_actions=prefix, committed_index=committed_index, args=args)
+                    groups.append(group)
+                    stream.append_group(group)
+                    if group.get("trainable"):
+                        trainable_by_family[str(group.get("family") or "unknown")] += 1
+                        trainable_by_template[str(group.get("template") or "unknown")] += 1
+                    stream.maybe_write_summary(
+                        groups,
+                        rollouts,
+                        extra=live_collect_extra(args, resumed_groups, resumed_rollouts, completed=False),
+                        every=args.stream_flush_every,
+                    )
                 committed = samples[committed_index]
                 prefix.append(committed["action"])
                 total_reward += float(committed.get("env_reward", 0.0))
@@ -322,7 +402,7 @@ def collect_onpolicy_groups(
                         "exec_error": committed.get("exec_error"),
                         "reward_step": committed.get("env_reward"),
                         "verifier": committed.get("verifier"),
-                        "sample_group_id": group.get("group_id"),
+                        "sample_group_id": group.get("group_id") if group is not None else None,
                     }
                 )
                 if len(groups) >= args.max_groups:
@@ -452,6 +532,83 @@ def action_key(action: dict[str, Any]) -> str:
     return json.dumps(action, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def injected_candidate_actions(
+    env: PlaywrightBrowserEnv,
+    task: Any,
+    obs: dict[str, Any],
+    seen_actions: set[str],
+    args: argparse.Namespace,
+) -> list[dict[str, Any]]:
+    if str(getattr(task, "template", "")) != "advanced_scroll":
+        return []
+    actions: list[dict[str, Any]] = []
+    if args.inject_scroll_candidates and not target_already_visible(obs):
+        for dy in parse_scroll_candidate_dys(args.scroll_candidate_dys):
+            action = {"action": "scroll", "dy": dy}
+            append_injected_action(actions, seen_actions, action, args)
+    if args.inject_target_click_candidates and target_already_visible(obs):
+        for action in target_click_candidates(env, task):
+            append_injected_action(actions, seen_actions, action, args)
+    return actions
+
+
+def append_injected_action(
+    actions: list[dict[str, Any]],
+    seen_actions: set[str],
+    action: dict[str, Any],
+    args: argparse.Namespace,
+) -> None:
+    key = action_key(action)
+    if args.dedupe_actions and key in seen_actions:
+        return
+    seen_actions.add(key)
+    actions.append(action)
+
+
+def target_click_candidates(env: PlaywrightBrowserEnv, task: Any) -> list[dict[str, Any]]:
+    try:
+        center_x, center_y = env.selector_center("#target")
+    except Exception:
+        return []
+    offsets = [(0, 0), (-20, 0), (20, 0), (0, -12), (0, 12)]
+    candidates: list[dict[str, Any]] = []
+    for dx, dy in offsets:
+        x, y = pixels_to_normalized(center_x + dx, center_y + dy, task.viewport)
+        candidates.append({"action": "click", "x": x, "y": y})
+    return candidates
+
+
+def parse_scroll_candidate_dys(value: str) -> list[int]:
+    dys: list[int] = []
+    for item in str(value or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        dys.append(int(float(item)))
+    return dys or [600, 900, 1200]
+
+
+def target_already_visible(obs: dict[str, Any]) -> bool:
+    history = obs.get("history") or []
+    if not history:
+        return False
+    progress = ((history[-1].get("verifier") or {}).get("progress") or {}) if isinstance(history[-1], dict) else {}
+    return bool(progress.get("target_visible"))
+
+
+def injected_policy_info(action: dict[str, Any], *, source: str) -> dict[str, Any]:
+    raw_text = json.dumps(action, ensure_ascii=False, separators=(",", ":"))
+    return {
+        "policy": "verifier_guided_injected_candidate",
+        "provider": "local_rule",
+        "source": source,
+        "raw_text": raw_text,
+        "valid_json": True,
+        "valid_action": True,
+        "error": None,
+    }
+
+
 def load_task_subset(args: argparse.Namespace, *, limit: int | None) -> list[Any]:
     tasks = load_tasks(args.tasks, limit=None)
     include_families = parse_csv_set(args.include_families)
@@ -511,15 +668,125 @@ def evaluate_branch(
     _, replay = reset_and_replay(env, task, prefix_actions, screenshot_prefix=screenshot_prefix)
     if replay.get("terminated") or replay.get("truncated"):
         info = replay.get("final_info") or {}
-        reward = shaped_reward(0.0, info, policy_info, args)
-        return sample_record(action, policy_info, info, env_reward=0.0, shaped=reward, terminated=True, truncated=False)
+        reward = shaped_reward(0.0, info, policy_info, args, reward_components={})
+        return sample_record(action, policy_info, info, env_reward=0.0, shaped=reward, terminated=True, truncated=False, reward_components={})
+    reward_components = branch_reward_components(env, task, prefix_actions, action, args)
     _, env_reward, terminated, truncated, info = env.step(action)
-    reward = shaped_reward(float(env_reward), info, policy_info, args)
-    return sample_record(action, policy_info, info, env_reward=float(env_reward), shaped=reward, terminated=terminated, truncated=truncated)
+    reward = shaped_reward(float(env_reward), info, policy_info, args, reward_components=reward_components)
+    return sample_record(
+        action,
+        policy_info,
+        info,
+        env_reward=float(env_reward),
+        shaped=reward,
+        terminated=terminated,
+        truncated=truncated,
+        reward_components=reward_components,
+    )
 
 
-def shaped_reward(env_reward: float, info: dict[str, Any], policy_info: dict[str, Any], args: argparse.Namespace) -> float:
+def branch_reward_components(
+    env: PlaywrightBrowserEnv,
+    task: Any,
+    prefix_actions: list[dict[str, Any]],
+    action: dict[str, Any],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    templates = parse_csv_set(args.target_distance_reward_templates)
+    if templates and str(getattr(task, "template", "")) not in templates:
+        return {}
+    components: dict[str, Any] = {}
+    distance = click_target_distance(env, task, action)
+    if distance is not None and args.target_distance_reward_weight > 0:
+        sigma = max(1e-6, float(args.target_distance_reward_sigma))
+        bonus = float(args.target_distance_reward_weight) * math.exp(-(distance * distance) / (2.0 * sigma * sigma))
+        components["target_distance"] = distance
+        components["target_distance_bonus"] = bonus
+    penalty = repeated_click_penalty(prefix_actions, action, args)
+    if penalty:
+        components["repeat_click_penalty"] = penalty
+    return components
+
+
+def click_target_distance(env: PlaywrightBrowserEnv, task: Any, action: dict[str, Any]) -> float | None:
+    if str((action or {}).get("action")) not in {"click", "double_click"}:
+        return None
+    if "x" not in action or "y" not in action:
+        return None
+    center = visible_selector_center(env, "#target")
+    if center is None:
+        return None
+    target_x, target_y = pixels_to_normalized(center[0], center[1], task.viewport)
+    try:
+        click_x = float(action["x"])
+        click_y = float(action["y"])
+    except Exception:
+        return None
+    return math.hypot(click_x - float(target_x), click_y - float(target_y))
+
+
+def visible_selector_center(env: PlaywrightBrowserEnv, selector: str) -> tuple[float, float] | None:
+    page = getattr(env, "page", None)
+    if page is None:
+        return None
+    try:
+        result = page.evaluate(
+            """
+(selector) => {
+  const element = document.querySelector(selector);
+  if (!element) return null;
+  const rect = element.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  if (rect.bottom <= 0 || rect.top >= window.innerHeight) return null;
+  if (rect.right <= 0 || rect.left >= window.innerWidth) return null;
+  return {x: rect.left + rect.width / 2, y: rect.top + rect.height / 2};
+}
+""",
+            selector,
+        )
+    except Exception:
+        return None
+    if not isinstance(result, dict) or "x" not in result or "y" not in result:
+        return None
+    return float(result["x"]), float(result["y"])
+
+
+def repeated_click_penalty(prefix_actions: list[dict[str, Any]], action: dict[str, Any], args: argparse.Namespace) -> float:
+    penalty = float(args.repeat_click_penalty)
+    if penalty <= 0 or str((action or {}).get("action")) not in {"click", "double_click"}:
+        return 0.0
+    try:
+        click_x = float(action["x"])
+        click_y = float(action["y"])
+    except Exception:
+        return 0.0
+    radius = max(0.0, float(args.repeat_click_radius))
+    for previous in reversed(prefix_actions):
+        if str((previous or {}).get("action")) not in {"click", "double_click"}:
+            continue
+        if "x" not in previous or "y" not in previous:
+            continue
+        try:
+            previous_x = float(previous["x"])
+            previous_y = float(previous["y"])
+        except Exception:
+            continue
+        if math.hypot(click_x - previous_x, click_y - previous_y) <= radius:
+            return -penalty
+    return 0.0
+
+
+def shaped_reward(
+    env_reward: float,
+    info: dict[str, Any],
+    policy_info: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    reward_components: dict[str, Any],
+) -> float:
     reward = float(env_reward) - float(args.step_cost)
+    reward += float(reward_components.get("target_distance_bonus") or 0.0)
+    reward += float(reward_components.get("repeat_click_penalty") or 0.0)
     if bool((info.get("verifier") or {}).get("success")):
         reward += float(args.success_bonus)
     if policy_info.get("valid_json") is False or policy_info.get("valid_action") is False:
@@ -538,6 +805,7 @@ def sample_record(
     shaped: float,
     terminated: bool,
     truncated: bool,
+    reward_components: dict[str, Any],
 ) -> dict[str, Any]:
     raw_text = str(policy_info.get("raw_text") or "").strip()
     completion_text = raw_text or json.dumps(action, ensure_ascii=False, separators=(",", ":"))
@@ -553,6 +821,7 @@ def sample_record(
         "exec_status": info.get("exec_status"),
         "exec_error": info.get("exec_error"),
         "verifier": info.get("verifier"),
+        "reward_components": reward_components,
         "info": info,
     }
 
@@ -633,10 +902,16 @@ def summarize_groups(groups: list[dict[str, Any]], rollouts: list[dict[str, Any]
 
 def train_group_relative_policy(args: argparse.Namespace, output_dir: Path, groups: list[dict[str, Any]]) -> dict[str, Any]:
     train_groups = [group for group in groups if group.get("trainable")]
+    if args.train_max_groups and len(train_groups) > args.train_max_groups:
+        train_groups = train_groups[: args.train_max_groups]
     if not train_groups:
         return {"trained": False, "reason": "no_trainable_groups", "groups": len(groups)}
 
     processor, model = load_trainable_qwen(args)
+    needs_cached_logprobs = args.grpo_loss_type == "clipped" or float(args.kl_beta) > 0
+    if needs_cached_logprobs and not args.skip_logprob_cache:
+        model.eval()
+        cache_sample_logprobs(model, processor, train_groups, args)
     model.train()
     optimizer = torch.optim.AdamW([param for param in model.parameters() if param.requires_grad], lr=args.learning_rate)
     trainable, total = parameter_counts(model)
@@ -647,6 +922,9 @@ def train_group_relative_policy(args: argparse.Namespace, output_dir: Path, grou
     replay_losses: list[float] = []
     reward_means: list[float] = []
     reward_stds: list[float] = []
+    approx_kls: list[float] = []
+    clip_fracs: list[float] = []
+    ratio_means: list[float] = []
     optimizer.zero_grad(set_to_none=True)
     update_steps = 0
     micro_steps = 0
@@ -672,6 +950,9 @@ def train_group_relative_policy(args: argparse.Namespace, output_dir: Path, grou
             policy_losses.append(float(policy_loss.detach().cpu().item()))
             reward_means.append(metrics["reward_mean"])
             reward_stds.append(metrics["reward_std"])
+            approx_kls.append(metrics.get("approx_kl", 0.0))
+            clip_fracs.append(metrics.get("clip_frac", 0.0))
+            ratio_means.append(metrics.get("ratio_mean", 1.0))
             micro_steps += 1
             if micro_steps % max(1, args.gradient_accumulation_steps) == 0:
                 if args.grad_clip > 0:
@@ -690,6 +971,8 @@ def train_group_relative_policy(args: argparse.Namespace, output_dir: Path, grou
     adapter_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(adapter_dir)
     processor.save_pretrained(adapter_dir)
+    if needs_cached_logprobs:
+        write_jsonl(output_dir / "train_groups_with_logprobs.jsonl", train_groups)
     return {
         "trained": True,
         "adapter_dir": str(adapter_dir),
@@ -698,6 +981,12 @@ def train_group_relative_policy(args: argparse.Namespace, output_dir: Path, grou
         "optimizer_steps": update_steps,
         "epochs": args.epochs,
         "learning_rate": args.learning_rate,
+        "grpo_loss_type": args.grpo_loss_type,
+        "clip_epsilon": args.clip_epsilon,
+        "kl_beta": args.kl_beta,
+        "old_logprob_key": args.old_logprob_key,
+        "reference_logprob_key": args.reference_logprob_key,
+        "cached_logprobs": needs_cached_logprobs and not args.skip_logprob_cache,
         "trainable_parameters": trainable,
         "total_parameters": total,
         "trainable_ratio": trainable / max(1, total),
@@ -710,6 +999,9 @@ def train_group_relative_policy(args: argparse.Namespace, output_dir: Path, grou
         "replay_loss_weight": args.replay_loss_weight,
         "reward_mean": sum(reward_means) / max(1, len(reward_means)),
         "reward_std_mean": sum(reward_stds) / max(1, len(reward_stds)),
+        "approx_kl_mean": sum(approx_kls) / max(1, len(approx_kls)),
+        "clip_frac_mean": sum(clip_fracs) / max(1, len(clip_fracs)),
+        "ratio_mean": sum(ratio_means) / max(1, len(ratio_means)),
     }
 
 
@@ -815,8 +1107,64 @@ def group_loss(model: Any, processor: Any, group: dict[str, Any], args: argparse
             )
         )
     logp_tensor = torch.stack(logps)
-    loss = -(advantages.detach() * logp_tensor).mean()
-    return loss, {"reward_mean": float(rewards.mean().detach().cpu().item()), "reward_std": float(reward_std.detach().cpu().item())}
+    metrics = {"reward_mean": float(rewards.mean().detach().cpu().item()), "reward_std": float(reward_std.detach().cpu().item())}
+    if args.grpo_loss_type == "vanilla" and float(args.kl_beta) <= 0:
+        loss = -(advantages.detach() * logp_tensor).mean()
+        return loss, metrics
+
+    old_logps = cached_sample_logprobs(group, args.old_logprob_key, logp_tensor.device, logp_tensor.dtype)
+    ref_logps = cached_sample_logprobs(group, args.reference_logprob_key, logp_tensor.device, logp_tensor.dtype)
+    log_ratio = logp_tensor - old_logps
+    ratio = torch.exp(log_ratio.clamp(min=-20.0, max=20.0))
+    clipped_ratio = torch.clamp(ratio, 1.0 - float(args.clip_epsilon), 1.0 + float(args.clip_epsilon))
+    objective = torch.minimum(ratio * advantages.detach(), clipped_ratio * advantages.detach())
+    policy_loss = -objective.mean()
+    approx_kl = 0.5 * ((logp_tensor - ref_logps) ** 2).mean()
+    loss = policy_loss + float(args.kl_beta) * approx_kl
+    clip_frac = (torch.abs(ratio - 1.0) > float(args.clip_epsilon)).float().mean()
+    metrics.update(
+        {
+            "approx_kl": float(approx_kl.detach().cpu().item()),
+            "clip_frac": float(clip_frac.detach().cpu().item()),
+            "ratio_mean": float(ratio.detach().mean().cpu().item()),
+        }
+    )
+    return loss, metrics
+
+
+def cache_sample_logprobs(model: Any, processor: Any, groups: list[dict[str, Any]], args: argparse.Namespace) -> None:
+    for group_index, group in enumerate(groups):
+        for sample in group.get("samples") or []:
+            completion = str(sample.get("completion_text") or json.dumps(sample.get("action") or {}, ensure_ascii=False))
+            with torch.no_grad():
+                logp = completion_logprob(
+                    model,
+                    processor,
+                    image_path=resolve_path(group["screenshot"]),
+                    prompt=str(group["prompt"]),
+                    completion=completion,
+                    system_prompt=args.system_prompt,
+                    reduction=args.logprob_reduction,
+                )
+            value = float(logp.detach().cpu().item())
+            sample.setdefault(args.old_logprob_key, value)
+            sample.setdefault(args.reference_logprob_key, value)
+        if (group_index + 1) % 10 == 0:
+            print(json.dumps({"sample_logprob_cached_groups": group_index + 1, "total": len(groups)}, ensure_ascii=False), flush=True)
+
+
+def cached_sample_logprobs(group: dict[str, Any], key: str, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    values = []
+    missing = []
+    for index, sample in enumerate(group.get("samples") or []):
+        if key not in sample:
+            missing.append(index)
+            values.append(0.0)
+        else:
+            values.append(float(sample[key]))
+    if missing:
+        raise RuntimeError(f"missing cached sample logprobs key={key} group={group.get('group_id')} sample_indices={missing[:5]}")
+    return torch.tensor(values, device=device, dtype=dtype)
 
 
 def completion_logprob(

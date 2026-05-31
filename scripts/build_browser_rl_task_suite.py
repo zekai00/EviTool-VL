@@ -542,6 +542,14 @@ document.querySelector('#confirm').onclick = () => {{ window.__taskState.success
 
 
 def scroll_task(seed: int) -> BrowserTaskSpec:
+    target_visible_js = """
+(() => {
+  const target = document.querySelector('#target');
+  if (!target) return false;
+  const rect = target.getBoundingClientRect();
+  return rect.top < window.innerHeight && rect.bottom > 0;
+})()
+""".strip()
     html = f"""<!doctype html><html><head><meta charset='utf-8'>{style(seed)}</head><body>
 <main class='app'><h1>Scroll</h1>
 <p class='muted'>The target is below the fold.</p>
@@ -560,7 +568,13 @@ document.querySelector('#target').onclick = () => {{ window.__taskState.success 
         template="advanced_scroll",
         seed=seed,
         max_steps=4,
-        verifier={"success_js": "window.__taskState && window.__taskState.success === true"},
+        verifier={
+            "success_js": "window.__taskState && window.__taskState.success === true",
+            "progress_js": {
+                "scrolled_down": "window.scrollY >= 300",
+                "target_visible": target_visible_js,
+            },
+        },
         oracle_actions=[{"action": "scroll", "dy": 900}, {"action": "click", "selector": "#target"}],
         family="advanced",
     )

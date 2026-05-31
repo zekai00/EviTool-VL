@@ -2,6 +2,61 @@
 
 更新日期：2026-05-29
 
+## 2026-05-29 16:46 CST 更新：pure VLM advanced_scroll 20tg 采集训练评测完成，不采用
+
+- 报告：`/root/Workspace/VLM/项目文档/03_实验与训练报告/PureVLM-AdvancedScroll采集训练评测报告_20260529_1646.md`
+- 仓库副本：`/root/Workspace/VLM/EviTool-VL/docs/项目文档/03_实验与训练报告/PureVLM-AdvancedScroll采集训练评测报告_20260529_1646.md`
+- 代码修正：`scripts/train_browser_rl_onpolicy_grpo.py` 新增 `--continue-on-single-sample`，默认允许只有一个唯一 VLM 动作的状态继续 rollout，但不创建 GRPO group。
+- 纯 VLM 采集：`/root/datasets/browser_rl/onpolicy/onpolicy_browser_rl_advanced_scroll_pure_vlm_collect_20260529_1611`，15 rollouts、27 groups、20 trainable_groups、184 samples，全部 samples 来源均为 `local_qwen`，injected samples=0。
+- 采集质量：`outputs/advanced_scroll_pure_vlm_collect_validation_20260529_1636`，valid_rollouts=15/15，error_count=0，rollout_success_rate=0.9333。
+- 训练 adapter：`outputs/onpolicy_browser_rl_grpo_advanced_scroll_pure_vlm_20tg_safe_20260529_1637/adapter`，从 289tg adapter 继续，lr=1e-7，20 trainable groups，5 optimizer steps，replay_loss_weight=0.08，replay_ratio=0.50。
+- 专项评测：`outputs/rollouts_local_qwen25vl_pure_vlm_20tg_advanced_scroll_progress_val30_20260529_1640`，advanced_scroll progress val30 success_rate=0.1667，与 289tg baseline 持平。
+- 决策：不采用 pure VLM 20tg adapter；当前主线仍为 `outputs/onpolicy_browser_rl_grpo_table_advanced_repair_289tg_safe_20260529_0101/adapter`。
+- 结论：默认关闭 injected candidates 是对的；但 pure VLM 小数据没有泛化。下一步应保持候选动作由 VLM 自采样，同时改 reward，加入目标可见后的点击距离奖励和重复失败点击惩罚。
+
+## 2026-05-29 15:00 CST 更新：关闭 injected candidates 默认开关，恢复默认 VLM 自采样
+
+- 修改文件：`scripts/train_browser_rl_onpolicy_grpo.py`、`AGENTS.md`、`docs/codex-worklog.md`。
+- 变更：`--inject-scroll-candidates` 和 `--inject-target-click-candidates` 的默认值从开启改为关闭。
+- 原因：默认实验应让当前 VLM 自己采样动作；verifier/DOM 注入 scroll 或 target-center click 候选会引入规则先验，不能作为严格纯 on-policy 结果。
+- 保留能力：如果要做探索增强或消融实验，仍可显式加 `--inject-scroll-candidates --inject-target-click-candidates` 打开。
+- 实验口径：此前 advanced_scroll 409tg/220tg 专项修复应标注为带 injected candidates 的探索增强实验，不应称为纯 on-policy。
+
+## 2026-05-29 14:56 CST 更新：补充 GRPO batch 与 reward/loss 逐步计算示例
+
+- 说明文档：`/root/Workspace/VLM/项目文档/03_实验与训练报告/BrowserRL-GRPO-Batch与RewardLoss逐步计算示例_20260529_1456.md`
+- 仓库副本：`/root/Workspace/VLM/EviTool-VL/docs/项目文档/03_实验与训练报告/BrowserRL-GRPO-Batch与RewardLoss逐步计算示例_20260529_1456.md`
+- 配套截图目录：`/root/Workspace/VLM/项目文档/03_实验与训练报告/GRPOBatchSearch示例_20260529_1456`
+- 示例 group：`onpolicy_100tg_g00021`，任务 `suite_search_137`，类型 `search_select`，step=3，4 个候选分支，reward=[0.2,1.0,0.2,1.0]，advantage=[-1,+1,-1,+1]。
+- 内容覆盖：reward 和 loss 的关系、`L_RL`/`L_SFT` 的计算、env_reward 与 shaped reward 两层含义、micro-batch/group/optimizer step 的实际结构、当前状态截图与 branch 截图分别在训练中的作用。
+
+## 2026-05-29 14:37 CST 更新：补充 BrowserRL GRPO group/reward 机制说明文档
+
+- 说明文档：`/root/Workspace/VLM/项目文档/03_实验与训练报告/BrowserRL-GRPO训练Group与Reward机制说明_20260529_1437.md`
+- 仓库副本：`/root/Workspace/VLM/EviTool-VL/docs/项目文档/03_实验与训练报告/BrowserRL-GRPO训练Group与Reward机制说明_20260529_1437.md`
+- 配套完整截图目录：`/root/Workspace/VLM/项目文档/03_实验与训练报告/GRPO训练Reward机制示例_20260529_1437`
+- 内容覆盖：verifier-guided 候选动作、group 的定义、每个状态采样多少候选动作、history 是否进入 prompt、每步是否参与 loss、max_steps 口径、SFT replay 保守损失、当前各任务类型 reward 设计。
+- 重要口径修正：本地 Qwen 自己采样的动作是严格 on-policy 部分；额外注入的 scroll/target-click 候选属于 verifier-guided exploration，不应在论文口径中混同为纯 on-policy GRPO。
+
+## 2026-05-29 05:40 CST 更新：advanced_scroll 滚动点击专项修复完成一轮，专项提升但未达主线切换标准
+
+- 报告：`/root/Workspace/VLM/项目文档/03_实验与训练报告/AdvancedScroll滚动点击专项修复实验报告_20260529_0540.md`
+- 仓库副本：`/root/Workspace/VLM/EviTool-VL/docs/项目文档/03_实验与训练报告/AdvancedScroll滚动点击专项修复实验报告_20260529_0540.md`
+- 修改文件：`scripts/build_browser_rl_task_suite.py`、`scripts/train_browser_rl_onpolicy_grpo.py`、`docs/codex-worklog.md`、`docs/项目文档/文档索引_20260527_1411.md`。
+- 新任务套件：`/root/datasets/browser_rl/task_suites/browser_rl_advanced_scroll_progress_900_20260529_0300`，共 900 tasks，其中 advanced_scroll=300；专项 split 为 train=240、val=30、test=30，本轮没有用专项 test 调参。
+- 代码改动：advanced_scroll verifier 增加 `scrolled_down` 和 `target_visible` 过程奖励；on-policy 采集增加 verifier-guided scroll 候选和目标可见后的 `#target` 中心点击候选。
+- 使用 GPU：所有训练和评测均显式使用 `CUDA_VISIBLE_DEVICES=1`，避开 GPU0 上用户正在运行的模型。
+- Oracle：`outputs/rollouts_oracle_advanced_scroll_progress_val30_20260529_0300`，success_rate=1.0，avg_steps=2。
+- 289tg baseline 在新 advanced_scroll val30：`outputs/rollouts_local_qwen25vl_289tg_advanced_scroll_progress_val30_20260529_0301`，success_rate=0.1667。
+- 第一轮修复采集：`/root/datasets/browser_rl/onpolicy/onpolicy_browser_rl_advanced_scroll_progress_collect_20260529_0308`，groups=57，trainable_groups=40，rollout_success_rate=0.8696。
+- 第一轮修复 adapter：`outputs/onpolicy_browser_rl_grpo_advanced_scroll_repair_409tg_safe_20260529_0358/adapter`，advanced_scroll val30=0.3000，val_balanced_70=0.9710。
+- 第二轮 scroll-click 采集：`/root/datasets/browser_rl/onpolicy/onpolicy_browser_rl_advanced_scroll_click_progress_collect_20260529_0444`，groups=47，trainable_groups=40，rollout_success_rate=0.9565。
+- 第二轮 scroll-click adapter：`outputs/onpolicy_browser_rl_grpo_advanced_scroll_click_repair_220tg_safe_20260529_0501/adapter`，advanced_scroll val30=0.4000，val_balanced_70=0.9420。
+- 数据质量：collect 23/23 valid；advanced_scroll val30 30/30 valid；val_balanced_70 69/69 valid；error_count 均为 0。
+- 决策：220tg adapter 只作为 advanced_scroll 专项实验版，不替换当前主线；已通过阶段验收的主线仍保守记录为 `outputs/onpolicy_browser_rl_grpo_table_advanced_repair_289tg_safe_20260529_0101/adapter`。409tg 可作为下一轮 scroll 修复的候选基座，但还未跑 val200。
+- 未解决问题：模型已稳定先滚动，但目标可见后点击坐标偏高，失败序列主要是 `scroll > click > click > click`；需要针对滚动后目标点击加入坐标距离奖励或专项 SFT/replay。
+- 下一步计划：构建目标可见后的 after-scroll click SFT/replay 小数据；在 GRPO reward 中加入点击点到目标中心距离的连续奖励和重复错误点击惩罚；advanced_scroll val30 达到 0.60-0.70 且 val_balanced_70 不退化后，再跑 val200。
+
 ## 2026-05-29 02:16 CST 更新：289 trainable groups table/advanced repair 完成，test200 达到 0.89
 
 - 报告：`/root/Workspace/VLM/项目文档/03_实验与训练报告/VerifierGuided-OnPolicy-GRPO-TableAdvancedRepair-289TrainableGroups训练评测报告_20260529_0216.md`
@@ -1517,3 +1572,290 @@ CUDA_VISIBLE_DEVICES=0 python3 scripts/run_browser_rl_rollouts.py \
 - `docs/项目文档/04_阶段总结/VLM-Agentic-RL简历面试版阶段总结_20260528_1041.md`
 
 详细版记录了候选框路线、路线调整、本地 browser GUI-RL 环境、1000 任务增强 SFT、test100 结果和下一步 on-policy RL 判断，并解释了关键技术名词。简历面试版整理为项目一句话、简历 bullet、面试讲述、量化指标、技术栈和高频问答。
+
+## 2026-05-29 18:25 CST 更新：AdvancedScroll 距离 Reward 小实验
+
+### 完成内容
+
+- 按“让 VLM 自己选动作，不默认注入候选”的原则，给 `scripts/train_browser_rl_onpolicy_grpo.py` 增加目标距离 reward 和重复点击惩罚。
+- 采集 advanced_scroll distance reward on-policy 数据：`/root/datasets/browser_rl/onpolicy/onpolicy_browser_rl_advanced_scroll_distance_reward_collect_20260529_1756`。
+- 固化采集临时文件：`groups.jsonl`、`rollouts.jsonl`、`collect_summary.json`。
+- 校验 rollout：`outputs/advanced_scroll_distance_reward_collect_validation_20260529_1815`，12/12 valid，error_count=0，exec_ok_step_rate=1.0。
+- 训练小规模 adapter：`outputs/onpolicy_browser_rl_grpo_advanced_scroll_distance_reward_20tg_safe_20260529_1816/adapter`。
+- 评测专项 val30：`outputs/rollouts_local_qwen25vl_distance_reward_20tg_advanced_scroll_progress_val30_20260529_1819`，success_rate=0.1667。
+- 输出报告：
+  - `/root/Workspace/VLM/项目文档/03_实验与训练报告/AdvancedScroll距离Reward实验报告_20260529_1825.md`
+  - `docs/项目文档/03_实验与训练报告/AdvancedScroll距离Reward实验报告_20260529_1825.md`
+
+### 关键结果
+
+- 采集：23 groups，20 trainable_groups，142 samples，rollout success_rate=0.8333。
+- reward shaping 有效产生组内分差：target_distance_bonus samples=128，mean bonus=0.2412，reward_std_mean=0.1921。
+- 训练：20 trainable_groups，5 optimizer_steps，reward_mean=0.4777，reward_std_mean=0.2210。
+- 评测：advanced_scroll progress val30=0.1667，与 289tg baseline 持平。
+- 失败形态：30/30 第一步为 scroll；25/30 为 `scroll > click > click > click`；29/30 最终 `scrolled_down=true,target_visible=true`，主要瓶颈仍是目标可见后的点击坐标偏差。
+
+### 修改文件
+
+- `scripts/train_browser_rl_onpolicy_grpo.py`
+- `AGENTS.md`
+- `docs/codex-worklog.md`
+- `/root/Workspace/VLM/项目文档/03_实验与训练报告/AdvancedScroll距离Reward实验报告_20260529_1825.md`
+- `docs/项目文档/03_实验与训练报告/AdvancedScroll距离Reward实验报告_20260529_1825.md`
+- `/root/Workspace/VLM/项目文档/文档索引_20260527_1411.md`
+- `docs/项目文档/文档索引_20260527_1411.md`
+
+### 当前结论
+
+本次 distance reward 20tg adapter 不采用；当前主线 current model 仍是 `outputs/onpolicy_browser_rl_grpo_table_advanced_repair_289tg_safe_20260529_0101/adapter`。
+
+### 下一步计划
+
+1. 若继续纯 VLM on-policy 路线，把 distance reward 采集扩大到 80-150 trainable groups，并增加任务覆盖。
+2. 构造不泄露候选动作的 after-scroll click SFT replay，用成功点击轨迹约束目标可见后的坐标 grounding。
+3. 在 advanced_scroll val30 超过 0.40 前，不把相关 adapter 送入 val200/test200 调参。
+
+## 2026-05-30 02:58 CST 更新：山水画多模态资料整理 Agent 路线规划
+
+### 完成内容
+
+- 根据用户关于 VLM tool-call RL 真实应用场景的讨论，明确新方向不是“点网页生图”或“给 Flux 打分调参”，而是“山水画多模态资料整理与 evidence card 构建 agent”。
+- 新增详细规划文档：
+  - `/root/Workspace/VLM/项目文档/01_规划与路线/山水画多模态资料整理Agent项目规划与路线_20260530_0258.md`
+  - `docs/项目文档/01_规划与路线/山水画多模态资料整理Agent项目规划与路线_20260530_0258.md`
+- 更新文档索引。
+
+### 路线结论
+
+- 第一阶段不训练 Flux，不让 agent 点前端按钮，不把 ComfyUI 操作作为主任务。
+- 第一阶段聚焦 `ChineseLandscape-AgentBench v0.1`：PDF/网页/图像中的山水画插图定位、caption OCR、元数据抽取、文献证据检索和 evidence card 输出。
+- 数据建议放到 `/root/datasets/chinese_landscape_agentbench/`。
+- 技术路线是：benchmark + verifier + rule baseline -> single-shot VLM baseline -> trajectory SFT -> on-policy GRPO。
+
+## 2026-05-30 12:15 CST 更新：Trajectory-level GRPO 小实验验证
+
+### 完成内容
+
+- 新增 `scripts/collect_browser_rl_trajectory_grpo_probe.py`。
+- 使用当前 289tg adapter 做 trajectory-level GRPO 可训练性验证，不做权重训练。
+- 双 GPU 分片采集 50 个 train tasks，每个 task 采样 8 条完整 trajectory。
+- 合并输出：
+  - `/root/datasets/browser_rl/onpolicy/trajectory_level_grpo_probe_50x8_20260530_1130/merged`
+- 输出报告：
+  - `/root/Workspace/VLM/项目文档/03_实验与训练报告/TrajectoryLevelGRPO小实验验证报告_20260530_1215.md`
+  - `docs/项目文档/03_实验与训练报告/TrajectoryLevelGRPO小实验验证报告_20260530_1215.md`
+
+### 关键结果
+
+- groups：50。
+- trajectories：400。
+- action steps：1480。
+- trainable_groups：42。
+- trainable_group_rate：0.84。
+- all_zero_reward_groups：0。
+- rollout_success_rate：0.8725。
+- avg_steps_per_trajectory：3.7。
+- valid_json_rate：1.0。
+- valid_action_rate：0.9993。
+- exec_ok_step_rate：1.0。
+
+### 当前判断
+
+trajectory-level GRPO 有实际训练信号，不是“为了做而做”。当前 289tg adapter 已经足够强，8 条完整轨迹并没有普遍全失败；相反，大多数 task group 有 reward 方差，可以训练。下一步可以实现小规模 trajectory-level GRPO 训练，但应加入 clipped ratio + KL，并继续保留 SFT replay。
+
+## 2026-05-30 13:13 CST 更新：备份 289tg BrowserRL Adapter
+
+### 完成内容
+
+- 将当前最稳的 BrowserRL 289tg adapter 复制到稳定模型目录，避免后续 trajectory-level GRPO 实验覆盖或找不到原版本。
+- 源路径：
+  - `outputs/onpolicy_browser_rl_grpo_table_advanced_repair_289tg_safe_20260529_0101/adapter`
+- 备份路径：
+  - `/root/models/adapters/browser_rl/qwen25vl_3b_browserrl_289tg_table_advanced_repair_adapter_backup_20260530_1313`
+
+### 备份内容
+
+- LoRA 权重：`adapter_model.safetensors`
+- adapter config：`adapter_config.json`
+- tokenizer / processor 文件
+- 原训练 summary：`training_summary_289tg.json`
+- 备份说明：`BACKUP_INFO.md`
+- 校验文件：`SHA256SUMS.txt`
+
+### 校验结果
+
+- 备份大小：约 130M。
+- `sha256sum -c SHA256SUMS.txt` 全部通过。
+- 后续 trajectory-level GRPO 训练应从该备份路径加载 adapter，并输出到新目录，不覆盖此备份。
+
+## 2026-05-30 14:20 CST 更新：Trajectory-level GRPO v1 训练与快速评测
+
+### 完成内容
+
+- 新增 trajectory-level GRPO 训练脚本：`scripts/train_browser_rl_trajectory_grpo.py`。
+- 从 289tg 备份 adapter 启动，使用 50x8 trajectory probe 数据中的 42 个 trainable groups 做 1 epoch 小规模训练。
+- 初版一次保留 8 条完整 trajectory 计算图时 OOM；已改为逐条 trajectory 反向传播、group 内累积梯度，24GB GPU 可稳定运行。
+- 训练输出：
+  - `outputs/trajectory_level_grpo_v1_smoke_20260530_1322/adapter`
+  - `outputs/trajectory_level_grpo_v1_50x8_20260530_1323/adapter`
+- 快速 gate 输出：
+  - `outputs/rollouts_local_qwen25vl_trajectory_grpo_v1_50x8_val_balanced70_20260530_1358`
+- 数据校验输出：
+  - `outputs/rollouts_local_qwen25vl_trajectory_grpo_v1_50x8_val_balanced70_20260530_1358/validated`
+- 输出报告：
+  - `/root/Workspace/VLM/项目文档/03_实验与训练报告/TrajectoryLevelGRPOv1训练评测报告_20260530_1420.md`
+  - `docs/项目文档/03_实验与训练报告/TrajectoryLevelGRPOv1训练评测报告_20260530_1420.md`
+
+### 关键结果
+
+- 训练：42 trainable groups，42 micro_steps，11 optimizer_steps。
+- 训练稳定性：`approx_kl_mean=1.576e-05`，没有策略爆炸。
+- replay：`replay_ratio=0.25`，`replay_loss_weight=0.05`，`replay_loss_mean=0.2548`。
+- `val_balanced_70`：69 rollouts，success_rate=0.9130，valid_json/action 均为 1.0，policy_error_rate=0。
+- 校验：69/69 valid，error_count=0，exec_ok_step_rate=1.0。
+
+### 与主线对比
+
+- 289tg 稳定版在同一 `val_balanced_70`：0.9420。
+- trajectory-level v1：0.9130。
+- v1 少成功 2 条，新增退化集中在 `advanced_scroll` 和 `table`。
+
+### 当前结论
+
+- trajectory-level GRPO 训练链路已经跑通，但本次 v1 不升级为 current model。
+- 当前主线 current model 继续保持：
+  - `/root/models/adapters/browser_rl/qwen25vl_3b_browserrl_289tg_table_advanced_repair_adapter_backup_20260530_1313`
+- 已按用户要求补跑 v1 的 val200；正式 gate 仍低于 289tg 主线，因此不升级。
+
+### 下一步计划
+
+1. 保留训练脚本和 v1 adapter 作为实验产物。
+2. 下一轮 trajectory-level GRPO 需要更均衡的 200-300 task trajectory 数据，尤其补 advanced/table/todo。
+3. 训练前过滤低信息 group：全成功但路径差异极小、重复错误点击、reward 方差不稳定的 group。
+4. 下一轮先跑 advanced/table 专项 gate，再跑 `val_balanced_70`；只有不低于 289tg 的 0.9420，再跑 val200。
+
+## 2026-05-30 14:52 CST 更新：Trajectory-level GRPO v1 补跑 Val200
+
+### 完成内容
+
+- 按用户要求补跑 trajectory-level v1 的正式 `val200`，避免只根据 69 条 `val_balanced_70` 判断。
+- 双卡并行评测：
+  - `outputs/rollouts_local_qwen25vl_trajectory_grpo_v1_50x8_val200_20260530_1427/shard_00`
+  - `outputs/rollouts_local_qwen25vl_trajectory_grpo_v1_50x8_val200_20260530_1427/shard_01`
+- 合并输出：
+  - `outputs/rollouts_local_qwen25vl_trajectory_grpo_v1_50x8_val200_20260530_1427/merged`
+- 校验输出：
+  - `outputs/rollouts_local_qwen25vl_trajectory_grpo_v1_50x8_val200_20260530_1427/validated`
+- 更新报告：
+  - `/root/Workspace/VLM/项目文档/03_实验与训练报告/TrajectoryLevelGRPOv1训练评测报告_20260530_1420.md`
+  - `docs/项目文档/03_实验与训练报告/TrajectoryLevelGRPOv1训练评测报告_20260530_1420.md`
+
+### 关键结果
+
+- shard_00：99 rollouts，success_rate=0.8889，avg_steps=4.4141。
+- shard_01：101 rollouts，success_rate=0.9109，avg_steps=2.5149。
+- merged：200 rollouts，success_rate=0.9000，success_count=180/200，avg_steps=3.4550。
+- validator：200/200 valid，error_count=0，exec_ok_step_rate=1.0。
+
+### 与 289tg 对比
+
+- 289tg val200：0.9100，182/200。
+- trajectory-level v1 val200：0.9000，180/200。
+- v1 比 289tg 少成功 2 条；advanced/menu 略有提升，但 form/search/table 退化更多。
+
+### 当前结论
+
+- 补跑 val200 后确认：trajectory-level v1 仍不升级为 current model。
+- 当前主线继续保持 289tg 备份 adapter：
+  - `/root/models/adapters/browser_rl/qwen25vl_3b_browserrl_289tg_table_advanced_repair_adapter_backup_20260530_1313`
+
+## 2026-05-31 01:04 CST 更新：Step-wise GRPO Ratio Clip / Reference KL 小实验
+
+### 完成内容
+
+- 在 `scripts/train_browser_rl_onpolicy_grpo.py` 中加入 old-policy ratio clip 与 reference KL 训练路径。
+- 新增缓存式 `old_logprob` / `reference_logprob`：训练开始前用初始 289tg adapter 给每个采样动作打 logprob，避免同时常驻两份 Qwen2.5-VL-3B。
+- 基于 289tg 备份 adapter 跑 20 trainable groups smoke 训练：
+  - `outputs/onpolicy_browser_rl_grpo_289tg_clipkl_smoke20_20260531_0017/adapter`
+- 用一致的 `--local-prompt-style full` 补跑完整 `val_balanced_70`：
+  - `outputs/rollouts_local_qwen25vl_289tg_clipkl_smoke20_valbalanced70_fullprompt_20260531_0100/merged`
+- 输出报告：
+  - `docs/项目文档/03_实验与训练报告/StepWiseGRPO-RatioClip-ReferenceKL小实验报告_20260531_0104.md`
+  - `/root/Workspace/VLM/项目文档/03_实验与训练报告/StepWiseGRPO-RatioClip-ReferenceKL小实验报告_20260531_0104.md`
+
+### 关键结果
+
+- 训练：20 trainable groups，3 optimizer steps，`learning_rate=1e-7`，`clip_epsilon=0.2`，`kl_beta=0.01`。
+- 稳定性：`approx_kl_mean=4.36e-6`，`clip_frac_mean=0.0`，`ratio_mean=1.0006`。
+- baseline 289tg `val_balanced_70`：65/69，success_rate=0.9420。
+- clipped/KL smoke20 `val_balanced_70`：62/69，success_rate=0.8986。
+- 新增退化：`suite_advanced_scroll_085`、`suite_form_367`、`suite_table_223`。
+
+### 当前结论
+
+- 本次 clipped/KL smoke adapter 不升级为 current model。
+- ratio clip / reference KL 代码路径保留；当前主线仍保持 289tg 备份 adapter。
+- 注意：评测 BrowserRL adapter 必须显式使用 `--local-prompt-style full`。一次默认 `sft_minimal` 评测会诱导模型输出 Qwen-VL 原生 GUI schema，不可作为能力指标。
+
+## 2026-05-31 02:46 CST 更新：SFT v3 同起点 Vanilla vs Clipped+KL GRPO 公平对比
+
+### 更正
+
+- 上一轮 `289tg -> clipped/KL 20tg` 是 continuation smoke，不是公平算法对比。
+- 用户指出后，补做了同一 SFT v3 起点、同一批 SFT v3 on-policy groups 的对照实验。
+
+### 数据与训练
+
+- 采集数据：
+  - `/root/datasets/browser_rl/onpolicy/onpolicy_browser_rl_sftv3_probe_60tg_20260531_0213`
+  - 173 groups，60 trainable groups，64 rollouts。
+- 共同起点：
+  - `checkpoints/qwen25vl_3b_history_aware_sft_v3_1000_aug_lora`
+- vanilla 输出：
+  - `outputs/onpolicy_browser_rl_sftv3_probe60_vanilla_20260531_0214/adapter`
+- clipped+KL 输出：
+  - `outputs/onpolicy_browser_rl_sftv3_probe60_clippedkl_20260531_0217/adapter`
+- clipped+KL 配置：
+  - `clip_epsilon=0.2`
+  - `kl_beta=0.01`
+  - `pi_old=pi_ref=SFT v3 adapter`
+
+### 结果
+
+- SFT v3 baseline `val_balanced_70`：57/69，success_rate=0.8261。
+- Vanilla GRPO 60tg：58/69，success_rate=0.8406。
+- Clipped+KL GRPO 60tg：61/69，success_rate=0.8841。
+- 历史 289tg staged adapter：65/69，success_rate=0.9420。
+- clipped+KL 相比 vanilla 多成功：
+  - `suite_advanced_scroll_088`
+  - `suite_form_363`
+  - `suite_search_343`
+
+### 当前结论
+
+- 正确同起点对比里，clipped+KL 优于 vanilla。
+- clipped+KL 60tg 仍低于历史 289tg staged adapter，暂不升级 current model。
+- 下一步应扩大到 200-300 trainable groups，并做 `vanilla beta=0`、`clipped beta=0`、`clipped beta=0.01` 三组对比，再跑 val200/test200。
+
+## 2026-05-31 03:36 CST 更新：SFT v3 同起点 60tg 的 val200 补跑完成
+
+### 完成内容
+
+- 补跑同一 SFT v3 起点的 60 trainable groups 对照实验到完整 `val_tasks.jsonl` 200 条。
+- 更新报告：
+  - `docs/项目文档/03_实验与训练报告/StepWiseGRPO-SFTv3同起点VanillaVsClippedKL对比报告_20260531_0246.md`
+  - `/root/Workspace/VLM/项目文档/03_实验与训练报告/StepWiseGRPO-SFTv3同起点VanillaVsClippedKL对比报告_20260531_0246.md`
+
+### 关键结果
+
+| 模型 | val200 success_rate | avg_steps |
+|---|---:|---:|
+| SFT v3 baseline | 0.745 | 3.810 |
+| Vanilla GRPO 60tg | 0.750 | 3.805 |
+| Clipped+KL GRPO 60tg | 0.770 | 3.765 |
+| 历史 289tg staged adapter | 0.910 | 3.445 |
+
+### 当前结论
+
+- clipped+KL 60tg 在 val200 上仍小幅优于 vanilla：0.770 vs 0.750。
+- 60tg 规模不足以替代 289tg staged adapter；当前 BrowserRL current model 仍应保持 289tg 备份 adapter。

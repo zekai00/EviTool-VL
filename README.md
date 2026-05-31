@@ -1,360 +1,434 @@
 # EviTool-VL
 
-Evidence-grounded visual tool reasoning for small vision-language models.
+<p align="center">
+  <a href="#中文"><kbd>中文</kbd></a>
+  <a href="#english"><kbd>English</kbd></a>
+</p>
 
-EviTool-VL is a research workspace for studying whether small VLMs can answer visual questions more reliably when they are trained or prompted to use explicit local visual tools. The repository currently focuses on Qwen2.5-VL-3B-Instruct and Qwen3-VL-4B-Instruct, a compact mixed evaluation set, deterministic tool execution, and first-pass direct-answer versus prompt-only tool-use baselines.
+## 中文
 
-EviTool-VL 是一个面向小型视觉语言模型的证据驱动视觉工具推理研究项目。项目目标是研究小模型在回答图表、文档、科学图示和 GUI 定位问题时，能否通过显式调用本地视觉工具获得更可靠、可审计的中间证据。本仓库当前围绕 Qwen2.5-VL-3B-Instruct 与 Qwen3-VL-4B-Instruct，构建小规模混合评测集、确定性工具层，以及直接回答和 prompt-only 工具调用两类基线。
+EviTool-VL 是一个面向视觉语言模型的 GUI tool-call reinforcement learning 项目。
 
-## Project Status / 项目状态
+项目目标不是让模型只做静态截图问答，而是训练一个 VLM agent：它能够观察浏览器页面截图，输出可执行动作 JSON，由 Playwright 浏览器环境真实执行动作，再通过 verifier reward 进行 SFT 和 on-policy GRPO 训练。
 
-This repository is an early research implementation, not a polished package. The committed code covers the first milestone:
-
-- environment and model-loading scripts;
-- local mini-evaluation data construction;
-- direct-answer VLM baseline evaluation;
-- prompt-only JSON action-observation-final tool-use evaluation;
-- local visual tools for crop, zoom, OCR, detection, measurement, marking, tracing, and virtual GUI clicking;
-- first reports for baseline behavior, tool-use behavior, and remaining failure cases.
-
-本仓库目前是早期研究实现，不是完整工程化发布包。已提交内容覆盖第一阶段里程碑：
-
-- 环境检查与模型下载脚本；
-- 本地 mini evaluation 数据构建；
-- 直接回答 VLM 基线评测；
-- 基于纯文本 JSON 协议的 action-observation-final 工具调用评测；
-- crop、zoom、OCR、detect、measure、mark、trace、click 等本地视觉工具；
-- 直接回答、工具调用和失败模式的初步报告。
-
-Large model weights, generated outputs, local dataset caches, third-party repositories, and runtime artifacts are intentionally excluded from Git.
-
-模型权重、生成输出、本地数据缓存、第三方仓库和运行时产物都不会提交到 Git。
-
-## Research Goal / 研究目标
-
-The central hypothesis is that small VLMs should not be evaluated only by final-answer accuracy. For visually grounded tasks, a useful model should also expose which image regions, text spans, detected boxes, or measured quantities support the answer.
-
-核心假设是：小型 VLM 不应只按最终答案正确率评估。在需要视觉定位和局部读数的任务中，一个有用的模型还应给出答案所依赖的图像区域、OCR 文本片段、检测框或测量结果。
-
-The intended EviTool-VL loop is:
-
-1. receive an image and question;
-2. decide whether local visual evidence is needed;
-3. call deterministic tools through a fixed JSON schema;
-4. receive structured observations with evidence ids;
-5. produce a concise final answer that cites the evidence.
-
-预期的 EviTool-VL 推理流程是：
-
-1. 接收图像和问题；
-2. 判断是否需要局部视觉证据；
-3. 通过固定 JSON schema 调用确定性工具；
-4. 接收带 evidence id 的结构化 observation；
-5. 输出简洁答案，并引用支撑答案的证据。
-
-## Repository Layout / 仓库结构
+核心任务定义：
 
 ```text
-.
-├── configs/                  # SFT and GRPO experiment configuration drafts
-├── datasets/                 # Evaluation-set construction scripts
-├── eval/                     # Direct and tool-use baseline evaluators
-├── reports/                  # Current result tables and analysis notes
-├── scripts/                  # Environment checks, model downloads, smoke tests, inference helpers
-├── tools/                    # Local visual tool implementation and JSON runner
-├── requirements.txt          # Core Python dependencies
-├── requirements-ocr.txt      # OCR backend dependencies
-└── README.md
+Executable GUI Tool-Call RL for Vision-Language Agents
 ```
 
-The top-level planning notes outside this directory are not part of the repository and are not required to run the committed code.
+也就是：给定一个可重置、可执行、可自动验证的浏览器任务，模型需要多步操作页面并完成目标。
 
-仓库目录外的中文规划文档没有纳入本仓库；运行当前已提交代码不依赖这些外部文档。
+### 为什么做这个项目
 
-## Models / 模型
-
-The first supported model family is Qwen-VL:
-
-- `Qwen/Qwen2.5-VL-3B-Instruct`
-- `Qwen/Qwen3-VL-4B-Instruct`
-
-Model files should be stored outside the Git repository, by default under:
-
-```bash
-/root/models
-```
-
-模型文件应放在 Git 仓库外，默认位置为：
-
-```bash
-/root/models
-```
-
-Download helper:
-
-```bash
-python3 scripts/download_models.py
-```
-
-Download a single model:
-
-```bash
-python3 scripts/download_models.py --model Qwen/Qwen2.5-VL-3B-Instruct
-```
-
-The downloader uses Hugging Face by default and can fall back to ModelScope when configured.
-
-下载脚本默认使用 Hugging Face，也支持在配置后回退到 ModelScope。
-
-## Environment / 环境
-
-Recommended setup:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -U pip
-python3 -m pip install -r requirements.txt
-python3 -m pip install -r requirements-ocr.txt
-```
-
-If your environment already provides CUDA, PyTorch, and OCR packages, install only the missing dependencies. OCR backends are optional at runtime; the tool layer has fallback behavior, but OCR quality depends strongly on the available backend.
-
-如果环境中已经安装 CUDA、PyTorch 和 OCR 相关包，只需补齐缺失依赖。OCR 后端在运行时是可选的；工具层有 fallback 逻辑，但 OCR 质量会明显受后端影响。
-
-Check the local environment:
-
-```bash
-python3 scripts/check_env.py
-```
-
-## Data / 数据
-
-The mini evaluation set is built from public datasets and saved locally. By default, `datasets/build_eval_mini.py` writes to:
-
-```bash
-/root/models/datasets/evitool_eval_mini
-```
-
-The expected JSONL file is:
+普通 VLM benchmark 往往只检查最终文本答案。但真实 GUI agent 需要具备更强的闭环能力：
 
 ```text
-eval_mini_100.jsonl
+observe screenshot -> emit action JSON -> execute in browser -> receive verifier feedback -> continue or finish
 ```
 
-It contains a 100-sample mix:
+本项目重点研究：
 
-| Task | Count | Purpose |
-|---|---:|---|
-| ChartQA | 30 | chart/table reading and numeric reasoning |
-| DocVQA | 25 | document and figure text reading |
-| AI2D | 20 | science diagram multiple-choice QA |
-| ScreenSpot-v2 | 25 | GUI element grounding |
+- VLM action JSON 协议学习；
+- history-aware trajectory SFT；
+- 可 reset/step/verifier 的浏览器 RL 环境；
+- verifier-guided on-policy GRPO；
+- clipped ratio、reference KL、SFT replay 等稳定化策略；
+- 小参数 VLM 在真实可执行 GUI 任务上的能力边界。
 
-构建脚本会从公开数据集中抽取样本并保存到本地，默认生成 100 条混合评测数据：ChartQA 30 条、DocVQA 25 条、AI2D 20 条、ScreenSpot-v2 25 条。数据文件和图像不提交到 Git。
+### 当前能力
 
-Build the dataset:
+当前主线模型是 Qwen2.5-VL-3B-Instruct 加 LoRA adapter。模型能在本地浏览器任务中完成多类 GUI 操作：
 
-```bash
-python3 datasets/build_eval_mini.py --output-dir /root/models/datasets/evitool_eval_mini
+- 填写表单；
+- 搜索并选择结果；
+- 点击菜单项；
+- 操作表格按钮；
+- 添加 todo；
+- 选择 checkbox/radio/select；
+- 处理 tab 和 dialog；
+- 部分处理 scroll 后点击任务。
+
+当前最强 adapter 在 200 条 held-out test tasks 上达到：
+
+| model | test success | avg steps | valid JSON | valid action |
+|---|---:|---:|---:|---:|
+| Qwen2.5-VL-3B + staged GRPO adapter | **0.890** | 3.465 | 1.000 | 1.000 |
+
+按任务类型拆分：
+
+| family | test count | success |
+|---|---:|---:|
+| todo | 20 | **1.000** |
+| menu | 25 | 0.920 |
+| form | 45 | 0.911 |
+| search | 40 | 0.900 |
+| choice | 33 | 0.879 |
+| table | 25 | 0.840 |
+| advanced | 12 | 0.667 |
+
+主要短板是 `advanced_scroll`，在 test split 中仍未稳定解决。
+
+### BrowserRL 任务环境
+
+项目构建了一个本地 BrowserRL task suite，包含 2000 个可执行任务：
+
+| split | tasks |
+|---|---:|
+| train | 1600 |
+| validation | 200 |
+| test | 200 |
+| total | 2000 |
+
+任务类型分布：
+
+| family | total |
+|---|---:|
+| form | 450 |
+| search | 400 |
+| choice | 350 |
+| menu | 250 |
+| table | 250 |
+| todo | 200 |
+| advanced | 100 |
+
+所有任务都通过 scripted oracle 校验，oracle success rate 为 1.000。这说明任务、浏览器 reset/step、动作执行和 verifier 判分链路是闭环可解的。
+
+### SFT 结果
+
+原始 instruct 底模并不会自动适配本项目的 GUI action JSON 协议。在同一套 prompt 和执行环境下，原始 Qwen2.5-VL-3B 在 balanced validation subset 上 success 为 0。
+
+SFT 阶段结果：
+
+| stage | data scale | eval set | success | note |
+|---|---:|---|---:|---|
+| raw Qwen2.5-VL-3B | 0 | val balanced | 0.000 | 未学会可执行动作协议 |
+| history-aware SFT v2 | 300 tasks | test30 | 0.333 | 初步学会多步状态 |
+| history-aware SFT v3 | 1000 tasks + augmentation | test100 | 0.820 | 达到可用 warmup |
+| history-aware SFT v3 | 1000 tasks + augmentation | val200 | 0.745 | 后续 RL 起点 |
+| form/choice repair SFT | mixed replay | test100 | 0.760 | 局部修复但整体退化，未采用 |
+
+v3 SFT 使用坐标扰动和失败恢复示范，训练样本约 7.9k rows，valid JSON rate 和 valid action rate 均达到 1.000。
+
+### On-Policy GRPO 结果
+
+RL 阶段从 history-aware SFT v3 出发，使用模型自己在环境中采样得到的 on-policy groups 训练。Verifier 根据真实浏览器状态给 reward。
+
+正式 val200 对比：
+
+| method | trainable groups | val200 success | avg steps |
+|---|---:|---:|---:|
+| SFT v3 baseline | 0 | 0.745 | 3.810 |
+| step-wise GRPO 100tg | 100 | 0.790 | 3.680 |
+| step-wise GRPO + replay 213tg | 213 | 0.850 | 3.560 |
+| table/advanced repair GRPO 289tg | 289 | **0.910** | **3.445** |
+
+最终 289tg adapter 首次打开 test200 后达到 0.890 success，说明提升不是只在 validation 上成立。
+
+### GRPO 消融
+
+项目进一步比较了不同 GRPO 变体。
+
+同一 SFT v3 起点、同一批 60 trainable groups 的 step-wise 对比：
+
+| method | val balanced | val200 | note |
+|---|---:|---:|---|
+| SFT v3 baseline | 0.826 | 0.745 | no RL |
+| vanilla step-wise GRPO | 0.841 | 0.750 | 仅组内 reward 标准化 |
+| clipped + reference KL GRPO | **0.884** | **0.770** | epsilon=0.2, beta=0.01 |
+| staged 289tg GRPO | 0.942 | 0.910 | 分阶段累计 on-policy groups |
+
+Trajectory-level GRPO v1 也已跑通：
+
+| method | val balanced | val200 | decision |
+|---|---:|---:|---|
+| trajectory-level GRPO v1 | 0.913 | 0.900 | 低于 289tg staged adapter，未升级为主线 |
+| staged 289tg step-wise GRPO | **0.942** | **0.910** | 当前主线 |
+
+结论：trajectory-level RL 链路可行，但当前阶段 step-wise verifier-guided GRPO 配合 replay 更稳定；clipped ratio 和 reference KL 在小规模 probe 中有正向信号，值得作为后续主线补强。
+
+### GUI Candidate Selection 前置实验
+
+在真正 BrowserRL 之前，项目也做过 GUI candidate selection 预研：给定候选框，让模型选择正确目标区域。这个方向现在不是主线，但它帮助明确了 GUI grounding 的瓶颈。
+
+OS-Atlas Linux 2k candidate pool：
+
+| policy | validation count | pointing | IoU@0.5 | avg IoU |
+|---|---:|---:|---:|---:|
+| random candidate | 423 | 0.021 | 0.017 | 0.015 |
+| top-1 heuristic | 423 | 0.026 | 0.021 | 0.020 |
+| oracle upper bound | 423 | **0.617** | **0.522** | **0.443** |
+
+Candidate-constrained GRPO ablation on val100:
+
+| method | avg reward | pointing | IoU@0.5 | avg IoU |
+|---|---:|---:|---:|---:|
+| SFT warmup | 0.255 | 0.110 | 0.090 | 0.081 |
+| old CC-GRPO | 0.346 | 0.200 | 0.170 | 0.138 |
+| listwise warmup | 0.337 | 0.200 | 0.160 | 0.135 |
+| listwise + KL + CC-GRPO | **0.366** | **0.240** | **0.180** | **0.157** |
+
+这个结果说明：候选约束下的 RL 确实能改善目标选择，但最终 GUI agent 不能只停留在“从候选框里选答案”，因此项目主线已转向可执行 BrowserRL。
+
+### 早期视觉工具基线
+
+项目早期还实现了 crop、zoom、OCR、detect、measure、click 等本地视觉工具，并在混合 VQA/GUI benchmark 上做了 direct-answer 与 prompt-only tool-use 对比。
+
+Medium-600 evaluation selected results：
+
+| model / setting | text exact | text relaxed | GUI pointing | evidence closed |
+|---|---:|---:|---:|---:|
+| Qwen2.5-VL-3B direct, no adapter | 0.780 | 0.830 | 0.215 | - |
+| Qwen2.5-VL-3B tool-use, no adapter | 0.398 | 0.478 | 0.100 | 0.178 |
+| Qwen2.5-VL-3B tool-use after SFT | 0.643 | 0.720 | **0.450** | 0.365 |
+| Qwen3-VL-4B direct, no adapter | 0.808 | 0.855 | 0.010 | - |
+| Qwen3-VL-4B tool-use after SFT | 0.718 | 0.805 | 0.110 | **0.988** |
+
+这些早期结果显示：prompt-only tool use 会牺牲部分文本 QA 分数，但能显著提高 evidence-closed 行为和部分 GUI grounding 能力。后续 BrowserRL 因此转向“可执行环境 + verifier reward”，而不是只做 prompt 工具调用。
+
+### 方法概览
+
+当前主线训练流程：
+
+1. Build executable tasks：构建可 reset、可 step、可 verifier 的浏览器任务。
+2. Scripted oracle rollout：用专家策略验证任务可解，并生成初始轨迹。
+3. History-aware SFT：让 VLM 学会根据截图、历史动作和 verifier progress 输出动作 JSON。
+4. On-policy rollout collection：当前模型自己在 Playwright 环境中采样动作。
+5. Verifier-guided GRPO：同一状态下多次采样，使用组内 reward 相对优势训练。
+6. Replay stabilization：混入 SFT replay 或旧 on-policy groups，降低能力遗忘。
+7. Held-out evaluation：使用 validation/test success rate、valid JSON、valid action 和 family-level metrics 评估。
+
+### 代码结构
+
+```text
+configs/      Training and experiment configs
+envs/         BrowserRL and sandbox environments
+eval/         Baseline and tool-use evaluators
+rl/           RL environment utilities
+scripts/      Dataset construction, rollout, SFT, GRPO, evaluation scripts
+tools/        Deterministic visual tools and JSON runner
+training/     Training helpers
 ```
 
-Create the local symlink expected by the evaluation scripts:
+Large datasets, checkpoints, generated rollouts, model weights, and private experiment logs are intentionally kept outside the public repository.
 
-```bash
-mkdir -p data
-ln -s /root/models/datasets/evitool_eval_mini data/eval_mini
+### Next Steps
+
+- Make clipped-ratio + reference-KL GRPO the default step-wise RL variant.
+- Improve exploration for `advanced_scroll`.
+- Run a larger trajectory-level GRPO comparison after the environment is stable.
+- Evaluate larger VLM backbones such as Qwen2.5-VL-7B under the same BrowserRL suite.
+- Publish a cleaned benchmark subset and reproducible evaluation script.
+
+## English
+
+EviTool-VL is a GUI tool-call reinforcement learning project for vision-language models.
+
+The goal is not static screenshot question answering. The goal is to train a VLM agent that observes browser screenshots, emits executable action JSON, interacts with a real Playwright browser environment, and learns from verifier rewards through trajectory SFT and on-policy GRPO.
+
+Core task:
+
+```text
+Executable GUI Tool-Call RL for Vision-Language Agents
 ```
 
-`data/eval_mini` is ignored by Git because it is machine-local.
+Given a resettable, executable, and automatically verifiable browser task, the model must operate the page through multiple steps and complete the goal.
 
-`data/eval_mini` 已加入 `.gitignore`，因为它是本机数据链接。
+### Motivation
 
-## Visual Tool Layer / 视觉工具层
+Standard VLM benchmarks usually evaluate only the final text answer. A GUI agent needs a closed interaction loop:
 
-All tools use JSON actions and return JSON observations. Coordinates use pixel-space `[x1, y1, x2, y2]` boxes unless otherwise stated.
-
-所有工具都使用 JSON action，并返回 JSON observation。除非另有说明，坐标格式为像素坐标 `[x1, y1, x2, y2]`。
-
-Example:
-
-```bash
-python3 -m tools.runner \
-  --image data/eval_mini/images/chartqa/0000.png \
-  --action '{"tool":"crop","args":{"bbox":[80,80,760,520]}}' \
-  --pretty
+```text
+observe screenshot -> emit action JSON -> execute in browser -> receive verifier feedback -> continue or finish
 ```
 
-Supported tools:
+This project studies:
 
-| Tool | Purpose / 用途 |
-|---|---|
-| `inspect` | Image metadata and basic statistics / 图像尺寸和基础统计信息 |
-| `crop` | Crop a region / 裁剪局部区域 |
-| `zoom` | Crop and enlarge a region / 裁剪并放大局部区域 |
-| `ocr` | Read text with EasyOCR, PaddleOCR, Tesseract, or fallback heuristics / 读取文本 |
-| `detect` | Detect layout, text, UI, chart bars, or color regions / 检测版面、文本、UI、柱状图或颜色区域 |
-| `measure` | Measure sizes, centers, distances, IoU, and bar heights / 测量尺寸、中心、距离、IoU 和柱高 |
-| `mark` | Draw visual annotations / 绘制标注 |
-| `visualize` | Render boxes and points / 可视化框和点 |
-| `trace` | Execute a sequence of tool actions / 执行工具调用序列 |
-| `click` | Record a virtual GUI click or selected bbox as evidence / 记录 GUI 点击点或目标框 |
+- VLM action-JSON protocol learning;
+- history-aware trajectory SFT;
+- reset/step/verifier browser RL environments;
+- verifier-guided on-policy GRPO;
+- stabilization with clipped ratio, reference KL, and SFT replay;
+- the capability boundary of compact VLMs on executable GUI tasks.
 
-See `tools/README.md` for backend notes and lower-level usage.
+### Current Capability
 
-更多后端说明和底层调用方式见 `tools/README.md`。
+The current mainline model is Qwen2.5-VL-3B-Instruct with a LoRA adapter. It can complete several browser GUI task families:
 
-## Evaluation / 评测
+- form filling;
+- search and result selection;
+- menu selection;
+- table actions;
+- todo creation;
+- checkbox/radio/select choices;
+- tab and dialog interaction;
+- partial scroll-and-click tasks.
 
-### Direct-Answer Baseline / 直接回答基线
+The strongest adapter reaches the following held-out test performance:
 
-Run Qwen2.5-VL-3B:
+| model | test success | avg steps | valid JSON | valid action |
+|---|---:|---:|---:|---:|
+| Qwen2.5-VL-3B + staged GRPO adapter | **0.890** | 3.465 | 1.000 | 1.000 |
 
-```bash
-python3 eval/eval_baseline.py \
-  --model /root/models/Qwen2.5-VL-3B-Instruct \
-  --data data/eval_mini/eval_mini_100.jsonl \
-  --image-root data/eval_mini \
-  --output outputs/baseline_3b_direct_eval_mini_100.jsonl \
-  --max-new-tokens 128
+Breakdown by task family:
+
+| family | test count | success |
+|---|---:|---:|
+| todo | 20 | **1.000** |
+| menu | 25 | 0.920 |
+| form | 45 | 0.911 |
+| search | 40 | 0.900 |
+| choice | 33 | 0.879 |
+| table | 25 | 0.840 |
+| advanced | 12 | 0.667 |
+
+The main unresolved weakness is `advanced_scroll`.
+
+### BrowserRL Environment
+
+The project builds a local BrowserRL task suite with 2000 executable tasks:
+
+| split | tasks |
+|---|---:|
+| train | 1600 |
+| validation | 200 |
+| test | 200 |
+| total | 2000 |
+
+Task-family distribution:
+
+| family | total |
+|---|---:|
+| form | 450 |
+| search | 400 |
+| choice | 350 |
+| menu | 250 |
+| table | 250 |
+| todo | 200 |
+| advanced | 100 |
+
+All 2000 tasks are solved by a scripted oracle with 1.000 success rate, validating the task definitions, browser execution loop, and verifier.
+
+### SFT Results
+
+The raw instruct model does not naturally follow this project's executable GUI action protocol. Under the same prompt and environment, raw Qwen2.5-VL-3B has 0 success on a balanced validation subset.
+
+SFT progression:
+
+| stage | data scale | eval set | success | note |
+|---|---:|---|---:|---|
+| raw Qwen2.5-VL-3B | 0 | val balanced | 0.000 | no executable-action protocol |
+| history-aware SFT v2 | 300 tasks | test30 | 0.333 | initial multi-step learning |
+| history-aware SFT v3 | 1000 tasks + augmentation | test100 | 0.820 | usable warmup |
+| history-aware SFT v3 | 1000 tasks + augmentation | val200 | 0.745 | RL starting point |
+| form/choice repair SFT | mixed replay | test100 | 0.760 | local repair but overall regression |
+
+The adopted SFT v3 stage uses coordinate jittering and recovery demonstrations. It contains about 7.9k training rows and reaches 1.000 valid-JSON and valid-action rates.
+
+### On-Policy GRPO Results
+
+The RL stage starts from history-aware SFT v3. The model collects its own on-policy groups in the browser environment, and a verifier scores the resulting states.
+
+Formal val200 comparison:
+
+| method | trainable groups | val200 success | avg steps |
+|---|---:|---:|---:|
+| SFT v3 baseline | 0 | 0.745 | 3.810 |
+| step-wise GRPO 100tg | 100 | 0.790 | 3.680 |
+| step-wise GRPO + replay 213tg | 213 | 0.850 | 3.560 |
+| table/advanced repair GRPO 289tg | 289 | **0.910** | **3.445** |
+
+The final 289tg adapter reaches 0.890 success on the held-out test200 split.
+
+### GRPO Ablations
+
+Same SFT v3 starting point, same 60 trainable groups:
+
+| method | val balanced | val200 | note |
+|---|---:|---:|---|
+| SFT v3 baseline | 0.826 | 0.745 | no RL |
+| vanilla step-wise GRPO | 0.841 | 0.750 | group-normalized reward only |
+| clipped + reference KL GRPO | **0.884** | **0.770** | epsilon=0.2, beta=0.01 |
+| staged 289tg GRPO | 0.942 | 0.910 | accumulated on-policy groups |
+
+Trajectory-level GRPO v1:
+
+| method | val balanced | val200 | decision |
+|---|---:|---:|---|
+| trajectory-level GRPO v1 | 0.913 | 0.900 | not promoted |
+| staged 289tg step-wise GRPO | **0.942** | **0.910** | current mainline |
+
+The trajectory-level pipeline works, but step-wise verifier-guided GRPO with replay is currently more stable. Clipped ratio and reference KL show positive signal and are planned for the next mainline version.
+
+### GUI Candidate Selection Pre-Study
+
+Before the current BrowserRL direction, the project studied GUI candidate selection: given candidate boxes, choose the correct target. This is no longer the mainline task, but it clarified the grounding bottleneck.
+
+OS-Atlas Linux 2k candidate pool:
+
+| policy | validation count | pointing | IoU@0.5 | avg IoU |
+|---|---:|---:|---:|---:|
+| random candidate | 423 | 0.021 | 0.017 | 0.015 |
+| top-1 heuristic | 423 | 0.026 | 0.021 | 0.020 |
+| oracle upper bound | 423 | **0.617** | **0.522** | **0.443** |
+
+Candidate-constrained GRPO ablation on val100:
+
+| method | avg reward | pointing | IoU@0.5 | avg IoU |
+|---|---:|---:|---:|---:|
+| SFT warmup | 0.255 | 0.110 | 0.090 | 0.081 |
+| old CC-GRPO | 0.346 | 0.200 | 0.170 | 0.138 |
+| listwise warmup | 0.337 | 0.200 | 0.160 | 0.135 |
+| listwise + KL + CC-GRPO | **0.366** | **0.240** | **0.180** | **0.157** |
+
+The candidate-selection experiments showed that RL can improve target selection, but an agent should not be limited to selecting from precomputed boxes. This motivated the shift to executable BrowserRL.
+
+### Early Visual Tool Baselines
+
+The early project stage implemented deterministic visual tools such as crop, zoom, OCR, detect, measure, and click, then compared direct-answer VLMs with prompt-only tool use.
+
+Medium-600 selected results:
+
+| model / setting | text exact | text relaxed | GUI pointing | evidence closed |
+|---|---:|---:|---:|---:|
+| Qwen2.5-VL-3B direct, no adapter | 0.780 | 0.830 | 0.215 | - |
+| Qwen2.5-VL-3B tool-use, no adapter | 0.398 | 0.478 | 0.100 | 0.178 |
+| Qwen2.5-VL-3B tool-use after SFT | 0.643 | 0.720 | **0.450** | 0.365 |
+| Qwen3-VL-4B direct, no adapter | 0.808 | 0.855 | 0.010 | - |
+| Qwen3-VL-4B tool-use after SFT | 0.718 | 0.805 | 0.110 | **0.988** |
+
+These results motivated the move from prompt-only tool use to executable environments and verifier reward.
+
+### Method Overview
+
+The current pipeline:
+
+1. Build executable tasks.
+2. Validate them with scripted oracle rollouts.
+3. Train history-aware trajectory SFT.
+4. Collect on-policy rollouts from the current model.
+5. Train with verifier-guided GRPO.
+6. Stabilize with SFT replay and old on-policy groups.
+7. Evaluate on held-out validation and test splits.
+
+### Repository Layout
+
+```text
+configs/      Training and experiment configs
+envs/         BrowserRL and sandbox environments
+eval/         Baseline and tool-use evaluators
+rl/           RL environment utilities
+scripts/      Dataset construction, rollout, SFT, GRPO, evaluation scripts
+tools/        Deterministic visual tools and JSON runner
+training/     Training helpers
 ```
 
-Run Qwen3-VL-4B:
+Large datasets, checkpoints, generated rollouts, model weights, and private experiment logs are intentionally kept outside the public repository.
 
-```bash
-python3 eval/eval_baseline.py \
-  --model /root/models/Qwen3-VL-4B-Instruct \
-  --data data/eval_mini/eval_mini_100.jsonl \
-  --image-root data/eval_mini \
-  --output outputs/baseline_4b_direct_eval_mini_100.jsonl \
-  --max-new-tokens 128
-```
+### Next Steps
 
-The evaluator writes JSONL predictions and a `.summary.json` metrics file next to the output.
-
-评测脚本会写出 JSONL 预测文件，并在同目录生成 `.summary.json` 指标文件。
-
-### Prompt-Only Tool-Use Baseline / 纯 Prompt 工具调用基线
-
-This baseline does not use native function calling. The model emits JSON text, `eval/eval_tool_baseline.py` parses it, executes local tools, appends observations to the chat, and asks for the next action or final answer.
-
-该基线不使用原生 function calling。模型输出 JSON 文本，由 `eval/eval_tool_baseline.py` 解析并执行本地工具，再把 observation 追加回对话，让模型继续输出下一步 action 或 final answer。
-
-Example:
-
-```bash
-python3 eval/eval_tool_baseline.py \
-  --model /root/models/Qwen3-VL-4B-Instruct \
-  --data data/eval_mini/eval_mini_100.jsonl \
-  --image-root data/eval_mini \
-  --output outputs/tool_4b_eval_mini_100.jsonl \
-  --max-tool-steps 2 \
-  --max-new-tokens 384
-```
-
-Smoke test:
-
-```bash
-python3 eval/eval_tool_baseline.py \
-  --model /root/models/Qwen2.5-VL-3B-Instruct \
-  --sample-per-task 1 \
-  --max-tool-steps 2 \
-  --output outputs/tool_smoke_3b_eval_mini.jsonl \
-  --max-new-tokens 384
-```
-
-## Current Results / 当前结果
-
-Current results are first-pass baselines on `data/eval_mini/eval_mini_100.jsonl`. They should be treated as diagnostic numbers, not final model rankings.
-
-当前结果来自 `data/eval_mini/eval_mini_100.jsonl` 的第一轮基线实验，应视为诊断指标，而不是最终模型排名。
-
-Direct-answer baseline:
-
-| Model | Text Relaxed | ChartQA | DocVQA | AI2D | ScreenSpot IoU@0.5 | ScreenSpot Pointing |
-|---|---:|---:|---:|---:|---:|---:|
-| Qwen2.5-VL-3B-Instruct | 81.33% | 63.33% | 92.00% | 95.00% | 0.00% | 12.00% |
-| Qwen3-VL-4B-Instruct | 76.00% | 66.67% | 80.00% | 85.00% | 0.00% | 8.00% |
-
-Prompt-only tool-use baseline with `max_tool_steps=2`:
-
-| Model | Text Relaxed | ChartQA | DocVQA | AI2D | ScreenSpot IoU@0.5 | ScreenSpot Pointing | Protocol Error | Evidence Closed |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| Qwen2.5-VL-3B-Instruct | 56.00% | 36.67% | 72.00% | 65.00% | 12.00% | 56.00% | 73.00% | 18.00% |
-| Qwen3-VL-4B-Instruct | 77.33% | 73.33% | 80.00% | 80.00% | 12.00% | 24.00% | 0.00% | 100.00% |
-
-Main interpretation:
-
-- Direct answering can perform well on some text QA tasks but gives no auditable evidence.
-- Direct GUI grounding is weak for both models, with 0% IoU@0.5 on this mini set.
-- Prompt-only tools improve GUI pointing and expose evidence, but the smaller 3B model has many protocol errors.
-- Tool use changes the failure mode; it does not solve grounding by prompt engineering alone.
-
-主要结论：
-
-- 直接回答在部分文本 QA 上表现尚可，但没有可审计证据；
-- 两个模型的直接 GUI grounding 都很弱，在该 mini set 上 IoU@0.5 为 0%；
-- prompt-only 工具调用改善了 GUI pointing，并能暴露 evidence，但 3B 模型协议错误率很高；
-- 工具调用改变了错误形态，但仅靠 prompt 不能彻底解决 grounding 问题。
-
-Detailed reports:
-
-- `reports/baseline_table.md`
-- `reports/baseline_findings.md`
-- `reports/tool_baseline_full.md`
-- `reports/tool_baseline_smoke.md`
-- `reports/failure_cases.md`
-
-## Training Plan / 训练计划
-
-Configuration drafts are provided for:
-
-- QLoRA supervised fine-tuning on tool traces;
-- GRPO-style optimization with answer, grounding, evidence, protocol, and efficiency rewards.
-
-配置草案包括：
-
-- 基于工具轨迹的 QLoRA SFT；
-- 使用 answer、grounding、evidence、protocol 和 efficiency 奖励的 GRPO 类优化。
-
-The next practical step is to build supervised action-observation-final traces from correct direct and tool-assisted examples, then train models to follow the fixed tool schema before applying reward optimization.
-
-下一步更实际的工作是从正确的直接回答样本和工具辅助样本中构造 action-observation-final 监督轨迹，先让模型学会稳定遵循工具 schema，再进行奖励优化。
-
-## Reproducibility Notes / 可复现性说明
-
-- Generated outputs under `outputs/` are ignored by Git.
-- Dataset caches and symlinks under `data/` are ignored by Git.
-- Model checkpoints are expected under `/root/models` or a user-provided path.
-- Evaluation results depend on model revision, `transformers` version, OCR backend, GPU availability, and decoding settings.
-- The current scripts use deterministic greedy decoding by default when `temperature=0`.
-
-可复现性注意事项：
-
-- `outputs/` 下的生成结果不会提交；
-- `data/` 下的数据缓存和符号链接不会提交；
-- 模型 checkpoint 默认位于 `/root/models`，也可以通过参数传入其它路径；
-- 结果会受模型版本、`transformers` 版本、OCR 后端、GPU 可用性和解码参数影响；
-- 当前脚本在 `temperature=0` 时默认使用确定性 greedy decoding。
-
-## Limitations / 局限
-
-- The mini evaluation set has only 100 samples and is intended for iteration speed, not final benchmarking.
-- OCR and detection tools are heuristic-heavy and not yet tuned per dataset.
-- Prompt-only JSON control is brittle for weaker models.
-- GUI grounding remains weak even after tool use.
-- Training and reward optimization configs are present, but full training runs are not yet committed as reproducible experiments.
-
-局限包括：
-
-- mini evaluation 只有 100 条样本，适合快速迭代，不适合作为最终 benchmark；
-- OCR 和 detection 仍以启发式为主，尚未针对各数据集充分调参；
-- 对较弱模型来说，纯 prompt JSON 控制不稳定；
-- 即使加入工具调用，GUI grounding 仍然较弱；
-- 仓库已有训练与奖励优化配置草案，但完整可复现实验尚未提交。
-
-## License / 许可
-
-No explicit license file is currently included. Add a license before redistribution or external reuse.
-
-当前仓库尚未包含明确的 license 文件。在对外分发或复用前应补充 license。
+- Make clipped-ratio + reference-KL GRPO the default step-wise RL variant.
+- Improve exploration for `advanced_scroll`.
+- Run a larger trajectory-level GRPO comparison after the environment is stable.
+- Evaluate larger VLM backbones such as Qwen2.5-VL-7B under the same BrowserRL suite.
+- Publish a cleaned benchmark subset and reproducible evaluation script.

@@ -49,6 +49,8 @@ observe screenshot -> emit action JSON -> execute in browser -> receive verifier
 - 处理 tab 和 dialog；
 - 部分处理 scroll 后点击任务。
 
+当前最强 adapter 是 staged 289tg step-wise GRPO，也就是从 SFT v3 出发，经过 100tg、213tg、289tg 分阶段 on-policy GRPO 得到的版本。它不是 clipped + reference KL 小实验版本；后者只是同起点 60tg 消融实验，效果还没有超过 289tg 主线。
+
 当前最强 adapter 在 200 条 held-out test tasks 上达到：
 
 | model | test success | avg steps | valid JSON | valid action |
@@ -159,7 +161,7 @@ OS-Atlas Linux 2k candidate pool：
 | top-1 heuristic | 423 | 0.026 | 0.021 | 0.020 |
 | oracle upper bound | 423 | **0.617** | **0.522** | **0.443** |
 
-Candidate-constrained GRPO ablation on val100:
+Candidate-constrained GRPO 在 val100 上的消融结果：
 
 | method | avg reward | pointing | IoU@0.5 | avg IoU |
 |---|---:|---:|---:|---:|
@@ -174,7 +176,7 @@ Candidate-constrained GRPO ablation on val100:
 
 项目早期还实现了 crop、zoom、OCR、detect、measure、click 等本地视觉工具，并在混合 VQA/GUI benchmark 上做了 direct-answer 与 prompt-only tool-use 对比。
 
-Medium-600 evaluation selected results：
+Medium-600 评测节选结果：
 
 | model / setting | text exact | text relaxed | GUI pointing | evidence closed |
 |---|---:|---:|---:|---:|
@@ -190,35 +192,35 @@ Medium-600 evaluation selected results：
 
 当前主线训练流程：
 
-1. Build executable tasks：构建可 reset、可 step、可 verifier 的浏览器任务。
-2. Scripted oracle rollout：用专家策略验证任务可解，并生成初始轨迹。
-3. History-aware SFT：让 VLM 学会根据截图、历史动作和 verifier progress 输出动作 JSON。
-4. On-policy rollout collection：当前模型自己在 Playwright 环境中采样动作。
+1. 构建可执行任务：构建可 reset、可 step、可 verifier 的浏览器任务。
+2. 专家轨迹校验：用 scripted oracle 验证任务可解，并生成初始轨迹。
+3. 历史感知 SFT：让 VLM 学会根据截图、历史动作和 verifier progress 输出动作 JSON。
+4. On-policy 轨迹采集：当前模型自己在 Playwright 环境中采样动作。
 5. Verifier-guided GRPO：同一状态下多次采样，使用组内 reward 相对优势训练。
-6. Replay stabilization：混入 SFT replay 或旧 on-policy groups，降低能力遗忘。
-7. Held-out evaluation：使用 validation/test success rate、valid JSON、valid action 和 family-level metrics 评估。
+6. Replay 稳定化：混入 SFT replay 或旧 on-policy groups，降低能力遗忘。
+7. 留出集评测：使用 validation/test success rate、valid JSON、valid action 和 family-level metrics 评估。
 
 ### 代码结构
 
 ```text
-configs/      Training and experiment configs
-envs/         BrowserRL and sandbox environments
-eval/         Baseline and tool-use evaluators
-rl/           RL environment utilities
-scripts/      Dataset construction, rollout, SFT, GRPO, evaluation scripts
-tools/        Deterministic visual tools and JSON runner
-training/     Training helpers
+configs/      训练和实验配置
+envs/         BrowserRL 环境与沙箱环境
+eval/         基线评测与工具调用评测
+rl/           强化学习环境工具
+scripts/      数据构建、轨迹采集、SFT、GRPO 和评测脚本
+tools/        确定性视觉工具与 JSON action runner
+training/     训练辅助代码
 ```
 
-Large datasets, checkpoints, generated rollouts, model weights, and private experiment logs are intentionally kept outside the public repository.
+大型数据、checkpoint、生成轨迹、模型权重和内部实验日志不会放在公开仓库中。
 
-### Next Steps
+### 下一步计划
 
-- Make clipped-ratio + reference-KL GRPO the default step-wise RL variant.
-- Improve exploration for `advanced_scroll`.
-- Run a larger trajectory-level GRPO comparison after the environment is stable.
-- Evaluate larger VLM backbones such as Qwen2.5-VL-7B under the same BrowserRL suite.
-- Publish a cleaned benchmark subset and reproducible evaluation script.
+- 将 clipped ratio + reference KL 接入下一版 step-wise GRPO 主线，而不是只停留在小规模消融实验。
+- 改进 `advanced_scroll` 的探索和 reward 设计。
+- 在环境稳定后，扩大 trajectory-level GRPO 对比实验。
+- 在同一 BrowserRL suite 上评测更大的 VLM 底模，例如 Qwen2.5-VL-7B。
+- 整理可公开的 benchmark 子集和可复现实验脚本。
 
 ## English
 

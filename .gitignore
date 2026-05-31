@@ -13,6 +13,10 @@ checkpoints/
 runs/
 wandb/
 
+# Private/internal notes and experiment reports
+docs/
+AGENTS.md
+
 # Data and model caches
 data/raw/
 data/processed/

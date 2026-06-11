@@ -96,6 +96,68 @@ observe screenshot -> emit action JSON -> execute in browser -> receive verifier
 
 所有任务都通过 scripted oracle 校验，oracle success rate 为 1.000。这说明任务、浏览器 reset/step、动作执行和 verifier 判分链路是闭环可解的。
 
+### BrowserRL-realistic-v2
+
+原始 BrowserRL suite 适合做受控的 SFT/RL 闭环研究，但页面仍偏简化。为了评估模型是否能迁移到更真实的前端组件和业务流程，项目新增了 realistic-v2 任务生成器：
+
+```text
+scripts/build_browser_rl_realistic_v2_suite.py
+```
+
+`BrowserRL-realistic-v2` 沿用现有 `BrowserTaskSpec` JSONL schema 和 Playwright verifier 管线，但把页面复杂度升级到更接近 SaaS/admin 前端：
+
+| family | template | count |
+|---|---|---:|
+| form | realistic_form_validation | 100 |
+| table | realistic_table_filter_open | 100 |
+| search | realistic_search_filter_result | 100 |
+| modal | realistic_modal_edit_confirm | 100 |
+| select | realistic_autocomplete_date_save | 100 |
+| workflow | realistic_account_status_workflow | 100 |
+
+已生成的数据集：
+
+```text
+/root/datasets/browser_rl/task_suites/browser_rl_realistic_v2_600_20260612_0003
+```
+
+| split | tasks |
+|---|---:|
+| train | 480 |
+| validation | 60 |
+| test | 60 |
+| total | 600 |
+
+scripted oracle 全量校验通过：
+
+| metric | value |
+|---|---:|
+| oracle rollouts | 600 |
+| oracle success | 1.000 |
+| avg oracle steps | 5.333 |
+| generated SFT rows | 3200 |
+
+基于 oracle rollouts 构建了 history-aware SFT 数据：
+
+```text
+/root/datasets/browser_rl/sft/local_qwen_history_aware_realistic_v2_600_20260612_0017
+```
+
+| split | rows | tasks |
+|---|---:|---:|
+| train | 2560 | 480 |
+| validation | 320 | 60 |
+| test | 320 | 60 |
+
+当前最强 289tg adapter 在 realistic-v2 balanced 小集上的 zero-shot 结果：
+
+| eval set | tasks | success | valid JSON | valid action |
+|---|---:|---:|---:|---:|
+| val balanced 12 | 12 | 0.083 | 1.000 | 1.000 |
+| test balanced 12 | 12 | 0.000 | 1.000 | 1.000 |
+
+这说明旧 adapter 仍能稳定输出合法 action JSON，但还不能可靠处理更真实的 dropdown、autocomplete、modal、table filter 和多步 workflow。realistic-v2 因此成为下一阶段 recovery SFT、on-policy distillation 和 realistic BrowserRL GRPO 的主要目标。
+
 ### SFT 结果
 
 原始 instruct 底模并不会自动适配本项目的 GUI action JSON 协议。在同一套 prompt 和执行环境下，原始 Qwen2.5-VL-3B 在 balanced validation subset 上 success 为 0。
@@ -219,9 +281,12 @@ training/     训练辅助代码
 
 ### 下一步计划
 
-- 将 clipped ratio + reference KL 接入下一版 step-wise GRPO 主线，而不是只停留在小规模消融实验。
-- 改进 `advanced_scroll` 的探索和 reward 设计。
-- 在环境稳定后，扩大 trajectory-level GRPO 对比实验。
+- 用 BrowserRL-realistic-v2 训练并评测下一版 history-aware SFT。
+- 从 realistic-v2 的当前模型失败轨迹构建 recovery SFT / on-policy distillation 数据。
+- 在 realistic-v2 上做 verifier-guided GRPO repair，优先修复 dropdown、autocomplete、modal、table filter 和 workflow。
+- 将 dynamic sampling、no-progress penalty、clipped ratio + reference KL 接入下一版 step-wise GRPO 主线。
+- 继续改进 `advanced_scroll` 的探索和 reward 设计。
+- 在环境稳定后，扩大 trajectory-level / GiGPO-style 多步信用分配实验。
 - 在同一 BrowserRL suite 上评测更大的 VLM 底模，例如 Qwen2.5-VL-7B。
 - 整理可公开的 benchmark 子集和可复现实验脚本。
 
@@ -313,6 +378,68 @@ Task-family distribution:
 | advanced | 100 |
 
 All 2000 tasks are solved by a scripted oracle with 1.000 success rate, validating the task definitions, browser execution loop, and verifier.
+
+### BrowserRL-realistic-v2
+
+The original BrowserRL suite is useful for controlled SFT/RL experiments, but its pages are still simplified. To test transfer to more realistic frontend components and business workflows, the project now includes a second task generator:
+
+```text
+scripts/build_browser_rl_realistic_v2_suite.py
+```
+
+`BrowserRL-realistic-v2` keeps the same `BrowserTaskSpec` JSONL schema and Playwright verifier pipeline, while upgrading the page complexity toward SaaS/admin UI patterns:
+
+| family | template | count |
+|---|---|---:|
+| form | realistic_form_validation | 100 |
+| table | realistic_table_filter_open | 100 |
+| search | realistic_search_filter_result | 100 |
+| modal | realistic_modal_edit_confirm | 100 |
+| select | realistic_autocomplete_date_save | 100 |
+| workflow | realistic_account_status_workflow | 100 |
+
+Generated suite:
+
+```text
+/root/datasets/browser_rl/task_suites/browser_rl_realistic_v2_600_20260612_0003
+```
+
+| split | tasks |
+|---|---:|
+| train | 480 |
+| validation | 60 |
+| test | 60 |
+| total | 600 |
+
+The scripted oracle solves all 600 tasks:
+
+| metric | value |
+|---|---:|
+| oracle rollouts | 600 |
+| oracle success | 1.000 |
+| avg oracle steps | 5.333 |
+| generated SFT rows | 3200 |
+
+History-aware SFT data was built from these oracle rollouts:
+
+```text
+/root/datasets/browser_rl/sft/local_qwen_history_aware_realistic_v2_600_20260612_0017
+```
+
+| split | rows | tasks |
+|---|---:|---:|
+| train | 2560 | 480 |
+| validation | 320 | 60 |
+| test | 320 | 60 |
+
+The previous strongest 289tg adapter was evaluated zero-shot on small balanced realistic-v2 subsets:
+
+| eval set | tasks | success | valid JSON | valid action |
+|---|---:|---:|---:|---:|
+| val balanced 12 | 12 | 0.083 | 1.000 | 1.000 |
+| test balanced 12 | 12 | 0.000 | 1.000 | 1.000 |
+
+This confirms that the old adapter still follows the action JSON protocol, but does not yet handle more realistic dropdowns, autocomplete widgets, modals, table filters, and multi-step workflows. The realistic-v2 suite is therefore the next target for recovery SFT, on-policy distillation, and realistic BrowserRL GRPO.
 
 ### SFT Results
 
@@ -435,8 +562,11 @@ Large datasets, checkpoints, generated rollouts, model weights, and private expe
 
 ### Next Steps
 
-- Make clipped-ratio + reference-KL GRPO the default step-wise RL variant.
-- Improve exploration for `advanced_scroll`.
-- Run a larger trajectory-level GRPO comparison after the environment is stable.
+- Train and evaluate the next history-aware SFT stage on BrowserRL-realistic-v2.
+- Build recovery SFT / on-policy distillation data from current-model realistic-v2 failures.
+- Run verifier-guided GRPO repair on realistic-v2, prioritizing dropdowns, autocomplete, modals, table filters, and workflows.
+- Add dynamic sampling, no-progress penalties, clipped ratio, and reference KL to the next step-wise GRPO mainline.
+- Continue improving exploration and reward design for `advanced_scroll`.
+- Expand trajectory-level / GiGPO-style multi-step credit assignment experiments after the environment is stable.
 - Evaluate larger VLM backbones such as Qwen2.5-VL-7B under the same BrowserRL suite.
 - Publish a cleaned benchmark subset and reproducible evaluation script.
